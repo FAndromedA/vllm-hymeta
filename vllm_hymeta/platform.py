@@ -1,4 +1,3 @@
-from typing import TYPE_CHECKING
 
 from vllm.platforms import PlatformEnum
 
@@ -6,16 +5,7 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-# avoid circular import
-# This constant is False when the Python interpreter executes 
-# the code at runtime. However, type checkers (like Mypy or Pyright) 
-# treat TYPE_CHECKING as True during their static analysis.
-if TYPE_CHECKING:
-    # from vllm.config import VllmConfig
-    from vllm.platforms.cuda import NvmlCudaPlatform # 不用 CudaPlatform 避免在 ray 初始化前就初始化了 cuda 环境
-else:
-    # VllmConfig = None
-    NvmlCudaPlatform = None
+from vllm.platforms.cuda import NvmlCudaPlatform # 不用 CudaPlatform 避免在 ray 初始化前就初始化了 cuda 环境
 
 
 class HymetaCudaPlatform(NvmlCudaPlatform):

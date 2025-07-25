@@ -262,7 +262,7 @@ class MetaAttentionMetadata(AttentionMetadata):
             slot_mapping=slot_mapping,
             multi_modal_placeholder_index_maps=
                 self.multi_modal_placeholder_index_maps,
-            enable_kv_sacles_calculation=
+            enable_kv_scales_calculation=
                 self.enable_kv_scales_calculation,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,

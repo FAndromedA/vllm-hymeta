@@ -52,6 +52,7 @@ class HymetaConfig(PretrainedConfig):
         self.attn_mode = attn_mode
         self.num_attention_heads = num_attention_heads
         self.num_key_value_heads = num_key_value_heads if num_key_value_heads is not None else num_attention_heads
+        self.head_dim = self.hidden_size // self.num_attention_heads
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
         self.use_lower_bound = use_lower_bound
@@ -67,6 +68,8 @@ class HymetaConfig(PretrainedConfig):
         self.attention_dropout = attention_dropout
         self.fuse_cross_entropy = fuse_cross_entropy
         self.full_attn_layers = [3, 11, 19, 27]
+        # dense MLP 层的索引
+        self.dense_mlp_layers = [0, 1, 2, 4, 6, 8, 10]
 
         self.interleaved_sliding_window = [
             0 if idx in self.full_attn_layers else sliding_window
@@ -74,6 +77,10 @@ class HymetaConfig(PretrainedConfig):
         ] # 在 meta_attention.py 中 0-1=-1 表示全局注意力
         
         self.num_local_experts = num_local_experts
+        self.num_layer_experts = [
+            num_local_experts if idx not in self.dense_mlp_layers else 1
+            for idx in range(num_hidden_layers)
+        ]
         self.num_experts_per_topk = num_experts_per_topk
         self.router_jitter_noise = router_jitter_noise
         self.shared_intermediate_size=shared_intermediate_size

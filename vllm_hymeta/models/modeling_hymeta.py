@@ -14,10 +14,10 @@ import torch.distributed
 import torch.nn.functional as F
 from einops import rearrange, repeat
 from transformers.activations import ACT2FN
-from transformers.modeling_outputs import ( BaseModelOutputWithPast,
-                                           CausalLMOutputWithPast)
-from transformers.modeling_utils import PreTrainedModel
-from transformers.utils import logging
+# from transformers.modeling_outputs import ( BaseModelOutputWithPast,
+#                                            CausalLMOutputWithPast)
+# from transformers.modeling_utils import PreTrainedModel
+# from transformers.utils import logging
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, VllmConfig
@@ -30,11 +30,11 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.lightning_attn import (
-    lightning_attention, linear_decode_forward_triton
-)
+# from vllm.model_executor.layers.lightning_attn import (
+#     lightning_attention, linear_decode_forward_triton
+# )
 from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
+    # ColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
@@ -57,7 +57,7 @@ from vllm.model_executor.models.interfaces import HasInnerState, IsHybrid, Suppo
 from vllm.sequence import IntermediateTensors
 
 from fla.modules import ShortConvolution
-from fla.ops.gla import chunk_gla, fused_chunk_gla, fused_recurrent_gla
+from fla.ops.gla import fused_chunk_gla# , chunk_gla, fused_recurrent_gla
 
 from .my_fused_recurrent_gla import my_fused_recurrent_gla
 from .hymeta_cache import HymetaCacheManager, HymetaCacheParams
@@ -69,11 +69,19 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
     num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
     """
-    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)    
+    if hidden_states.dim == 4:
+        batch, num_key_value_heads, slen, head_dim = hidden_states.shape 
+        hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
+        return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+    
+    # [num_tokens, num_heads, head_dim]
+    assert hidden_states.dim() == 3, \
+        "hidden_states should be 3D tensor, but got {}".format(hidden_states.dim())
+    num_tokens, num_heads, head_dim = hidden_states.shape
+    hidden_states = hidden_states[:, None, :, :].expand(num_tokens, n_rep, num_heads, head_dim)
+    return hidden_states.reshape(num_tokens, num_heads * n_rep, head_dim)
 
 
 def replace_weight_name(name: str,
@@ -283,7 +291,7 @@ class HymetaMoE(nn.Module):
             self.hidden_size,
             self.num_total_experts,
             bias=False,
-            params_dtype=torch.float32,
+            params_dtype=params_dtype,
             quant_config=None,
             prefix=f'{prefix}.gate',
         )
@@ -302,22 +310,39 @@ class HymetaMoE(nn.Module):
             activation="silu",
             prefix=f"{prefix}.experts",
         )
-
         return
 
     @staticmethod
     def gate_weight_loader(param: nn.Parameter,
                            loaded_weight: torch.Tensor) -> None:
-        assert param.size() == loaded_weight.size()
-        param.data.copy_(loaded_weight.to(torch.float32))
-        return
+        # assert param.size() == loaded_weight.size(), \
+        #     f"Expected {param.size()} but got {loaded_weight.size()}"
+        # param.data.copy_(loaded_weight)
+        # return # AssertionError: Expected torch.Size([3584, 16]) but got torch.Size([16, 3584])
+        # 检查是否为转置关系
+        if param.size() == loaded_weight.t().size(): 
+            # 转置后复制数据
+            param.data.copy_(loaded_weight.t())  
+        # 若维度完全一致则直接复制
+        elif param.size() == loaded_weight.size():  
+            param.data.copy_(loaded_weight)
+        # 处理无法匹配的情况
+        else:  
+            raise ValueError(
+                f"Shape mismatch: Expected {param.size()} or its transpose, "
+                f"but got {loaded_weight.size()}"
+            )
+        return 
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
-        router_logits_fp32, _ = self.gate(hidden_states.to(torch.float32))
+        # router_logits_fp32, _ = self.gate(hidden_states.to(torch.float32))
+        # final_hidden_states = self.experts(
+        #     hidden_states, router_logits_fp32.to(hidden_states.dtype))
+        router_logits = self.gate(hidden_states)
         final_hidden_states = self.experts(
-            hidden_states, router_logits_fp32.to(hidden_states.dtype))
+            hidden_states, router_logits.to(hidden_states.dtype))
         final_hidden = final_hidden_states.view(num_tokens, hidden_size)
         return final_hidden
     
@@ -342,7 +367,7 @@ class HLinearAttention(nn.Module):
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.total_num_key_value_heads = num_key_value_heads
-        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
+        self.num_key_value_groups = self.num_heads // num_key_value_heads
         self.num_meta_tokens = num_meta_tokens
 
         self.use_short_conv = use_short_conv
@@ -437,8 +462,9 @@ class HLinearAttention(nn.Module):
             if _prefill_idx >= len(state_indices_tensor):
                 break
             # 因为把 meta_tokens 插到了最前面，所以需要加上 num_meta_tokens，所有 prefill 请求共用。 
-            _start = attn_metadata.query_start_loc[_prefill_idx] + self.num_meta_tokens 
-            _end = attn_metadata.query_start_loc[_prefill_idx + 1] + self.num_meta_tokens # 取出这个 prefill 请求的 tokens 范围
+            meta_tokens_offset = self.num_meta_tokens if not has_meta_cache else 0
+            _start = attn_metadata.query_start_loc[_prefill_idx] + meta_tokens_offset
+            _end = attn_metadata.query_start_loc[_prefill_idx + 1] + meta_tokens_offset  # 取出这个 prefill 请求的 tokens 范围
             slot_id = state_indices_tensor[_prefill_idx]
 
             q_slice = q[_start:_end].transpose(0, 1).contiguous() # [num_heads, num_tokens, head_dim]
@@ -475,7 +501,8 @@ class HLinearAttention(nn.Module):
 
         if attn_metadata.num_decode_tokens > 0: # 有需要解码的 tokens
             hidden.append(
-                self._decode(q, k, v, g, kv_cache, state_indices_tensor, attn_metadata)
+                self._decode(q, k, v, g, kv_cache, has_meta_cache,
+                             state_indices_tensor, attn_metadata)
             )
         if not hidden:
             return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
@@ -483,9 +510,10 @@ class HLinearAttention(nn.Module):
         hidden = torch.concat(hidden, dim=0).contiguous() # [num_tokens, h*d]
         return hidden
     
-    def _decode(self, q, k, v, g, kv_cache, state_indices_tensor, attn_metadata):
+    def _decode(self, q, k, v, g, kv_cache, has_meta_cache, state_indices_tensor, attn_metadata):
         # 因为解码的请求的长度都是 1， 这里的 num_tokens 维度等效于 batch 维度(同时处理多个解码请求)
-        _start = attn_metadata.num_prefill_tokens + self.num_meta_tokens
+        meta_tokens_offset = self.num_meta_tokens if not has_meta_cache else 0
+        _start = attn_metadata.num_prefill_tokens + meta_tokens_offset
         q = q[_start:].unsqueeze(2).contiguous() # [num_tokens, num_heads, 1, head_dim]
         k = k[_start:].unsqueeze(2).contiguous()
         v = v[_start:].unsqueeze(2).contiguous()
@@ -506,12 +534,12 @@ class HLinearAttention(nn.Module):
         # if self.use_short_conv: # config.use_short_conv 是 False， 因为这部分比较麻烦，所以先没实现
 
         qkv, _ = self.qkv_proj(hidden_states) # [num_tokens, hidden_size]
-        qkv32 = qkv.to(torch.float32)
+        # qkv32 = qkv.to(torch.float32)
             # qkvact = torch.nn.functional.silu(qkv32)
-        qkvact = qkv32.view((qkv.shape[0], self.tp_heads, -1)) # [num_tokens, num_heads, head_dim]
+        qkvact = qkv.view((qkv.shape[0], self.tp_heads, -1)) # [num_tokens, num_heads, head_dim]
         q, k, v = torch.split(qkvact, [self.q_size, self.kv_size, self.kv_size], dim=-1)
         
-        
+        # 这里之后可以优化不 repeat_kv 
         k = repeat_kv(k, self.tp_heads // self.tp_kv_heads) # [num_tokens, num_heads, head_dim]
         v = repeat_kv(v, self.tp_heads // self.tp_kv_heads)
 
@@ -553,7 +581,7 @@ class HLinearAttention(nn.Module):
                                                 state_indices_tensor,
                                                 attn_metadata)
         else:
-            outputs = self._decode(q, k, v, g, kv_cache,
+            outputs = self._decode(q, k, v, g, kv_cache, has_meta_cache,
                                         state_indices_tensor, attn_metadata)
         
         return outputs
@@ -575,7 +603,6 @@ class FlashAttention(nn.Module):
         num_heads: int,
         head_dim: int,
         num_kv_heads: int,
-        rotary_dim: int,
         max_position: int = 8192,#4096 * 32,
         num_meta_tokens: int = 128,
         rope_theta: float = 10000,
@@ -702,13 +729,13 @@ class IntraHybridAttention(nn.Module):
             config=config,
             hidden_size=config.hidden_size,
             num_heads=config.num_attention_heads,
-            num_key_value_heads=config.num_key_value_heads,
-            max_position_embeddings=config.max_position_embeddings,
+            head_dim=self.head_dim,
+            num_kv_heads=config.num_key_value_heads,
+            max_position=config.max_position_embeddings,
             # use_swa=(layer_idx not in config.full_attn_layers),
             # sliding_window=config.sliding_window,
             num_meta_tokens=config.num_meta_tokens,
             rope_theta=config.rope_theta,
-            attention_dropout=config.attention_dropout,
             layer_idx=layer_idx,
             quant_config=quant_config,
             cache_config=cache_config,
@@ -793,48 +820,49 @@ class HybridBlock(nn.Module):
                 intermediate_size=config.intermediate_size,
                 quant_config=quant_config,
                 layer_idx=layer_idx,
-                prefix=prefix # f"{prefix}.mlp",
+                prefix=f"{prefix}.mlp",
             )
         else:
             self.block_sparse_moe = HymetaMoE(
                 num_experts=expert_num,
-                top_k=config.num_experts_per_tok,
+                top_k=config.num_experts_per_topk,
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
+                params_dtype=torch.bfloat16,
                 layer_idx=layer_idx,
                 quant_config=quant_config,
                 prefix=f"{prefix}.block_sparse_moe",
             )
         
-        self.shared_moe = False
-        
-        shared_intermediate = getattr(config, "shared_intermediate_size", 0)
-        if isinstance(shared_intermediate, list):
-            if len(shared_intermediate) > layer_idx:
-                shared_intermediate = shared_intermediate[layer_idx]
-            else:
-                shared_intermediate = 0
-        if shared_intermediate > 0:
-            self.shared_moe = True
-            self.shared_mlp = HymetaMLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=shared_intermediate,
-                quant_config=quant_config,
-                layer_idx=layer_idx,
-                prefix=f"{prefix}.shared_mlp",
-            )
-            # self.coefficient = ReplicatedLinear(
-            #     self.hidden_size,
-            #     1,
-            #     bias=False,
-            #     params_dtype=torch.float32,
-            #     quant_config=quant_config,
-            #     # prefix=f"{prefix}.coefficient",
-            # )
-            # self.coefficient.weight.weight_loader = (
-            #     self.shared_moe_coefficient_loader
-            # )
-            self.shared_moe_mode = getattr(config, "shared_moe_mode", "softmax")
+            self.shared_moe = False
+            
+            shared_intermediate = getattr(config, "shared_intermediate_size", 0)
+            if isinstance(shared_intermediate, list):
+                if len(shared_intermediate) > layer_idx:
+                    shared_intermediate = shared_intermediate[layer_idx]
+                else:
+                    shared_intermediate = 0
+            if shared_intermediate > 0:
+                self.shared_moe = True
+                self.shared_mlp = HymetaMLP(
+                    hidden_size=config.hidden_size,
+                    intermediate_size=shared_intermediate,
+                    quant_config=quant_config,
+                    layer_idx=layer_idx,
+                    prefix=f"{prefix}.shared_mlp",
+                )
+                # self.coefficient = ReplicatedLinear(
+                #     self.hidden_size,
+                #     1,
+                #     bias=False,
+                #     params_dtype=torch.float32,
+                #     quant_config=quant_config,
+                #     # prefix=f"{prefix}.coefficient",
+                # )
+                # self.coefficient.weight.weight_loader = (
+                #     self.shared_moe_coefficient_loader
+                # )
+                self.shared_moe_mode = getattr(config, "shared_moe_mode", "softmax")
 
     def forward(
         self,
@@ -865,11 +893,12 @@ class HybridBlock(nn.Module):
             moe_hidden_states = self.block_sparse_moe(copy.deepcopy(hidden_states))
             if self.shared_moe:
                 before_moe_dtype = hidden_states.dtype
-                moe_hidden_fp32 = moe_hidden_states.to(torch.float32)
+                # moe_hidden_fp32 = moe_hidden_states.to(torch.float32)
                 shared_mlp_out = self.shared_mlp(hidden_states).to(before_moe_dtype)
 
                 # no coef
-                hidden_states = shared_mlp_out + moe_hidden_fp32
+                # hidden_states = shared_mlp_out + moe_hidden_fp32
+                hidden_states = shared_mlp_out + moe_hidden_states
                 # coef, _ = self.coefficient(hidden_states.to(torch.float32))
                 # if self.shared_moe_mode == "softmax":
                 #     coef = torch.nn.functional.softmax(coef, dim=-1)
@@ -924,12 +953,12 @@ class HymetaModel(nn.Module):
             layer_config = config
             layer_config.layer_idx = layer_idx
             expert_num = 1
-            if hasattr(config, "num_local_experts") and isinstance(
-                config.num_local_experts, list):
-                expert_num = config.num_local_experts[layer_idx]
-            if hasattr(config, "num_local_experts") and isinstance(
-                config.num_local_experts, int):
-                expert_num = config.num_local_experts
+            if hasattr(config, "num_layer_experts") and isinstance(
+                config.num_layer_experts, list):
+                expert_num = config.num_layer_experts[layer_idx]
+            if hasattr(config, "num_layer_experts") and isinstance(
+                config.num_layer_experts, int):
+                expert_num = config.num_layer_experts
             return HybridBlock(
                 config=config, 
                 layer_idx=layer_idx,
@@ -968,7 +997,7 @@ class HymetaModel(nn.Module):
         del _dummy
         self.has_meta_cache = False # Become True after the first forward pass through all layers.
         self.hymeta_cache = HymetaCacheManager(
-            dtype=torch.float32,
+            dtype=torch.bfloat16,
             cache_shape=self.cache_shape,
             meta_linear_cache_shape=self.meta_linear_cache_shape,
             meta_fattn_cache_shape=self.meta_fattn_cache_shape,
@@ -989,7 +1018,7 @@ class HymetaModel(nn.Module):
             max_position=max_position_embeddings,
             base=rope_theta,
             is_neox_style=True,
-            cache_dtype=torch.float32,
+            cache_dtype=torch.bfloat16,
             # prefix=f"{prefix}.rotary_emb",
         )
         if get_pp_group().is_last_rank:
@@ -1106,6 +1135,7 @@ class HymetaModel(nn.Module):
             lower_bounds = self.lower_bounds.softmax(0)
             lower_bounds = lower_bounds.cumsum(0) - lower_bounds[0]
 
+        # 不管实际前面插没插入 meta tokens，这里都要加上偏移值
         new_positions = positions + self.num_meta_tokens
         if new_positions.shape[0] < hidden_states.shape[0]:
             # 因为 meta token 的插入导致 positions 的长度变了
@@ -1287,17 +1317,15 @@ class HymetaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only, Supp
             # to:
             #   model.layers.0.block_sparse_moe.experts.w13.weight
             #   model.layers.0.block_sparse_moe.experts.w2.weight
-            if isinstance(self.config.num_local_experts, list):
-                expert_params_mapping = [
-                    ("w13_weight"
-                     if weight_name in ["gate_proj", "up_proj"] else "w2_weight",
-                     f"experts.{expert_id}.{weight_name}.weight", expert_id)
-                    for expert_id in range(max(self.config.num_local_experts))
-                    for weight_name in ["gate_proj", "up_proj", "down_proj"]
-                ]
+            expert_params_mapping = FusedMoE.make_expert_params_mapping(
+                ckpt_gate_proj_name="gate_proj",
+                ckpt_down_proj_name="down_proj",
+                ckpt_up_proj_name="up_proj",
+                num_experts=self.config.num_local_experts
+            )   
             for (param_name, weight_name, expert_id,
                  shard_id) in expert_params_mapping:
-                name_expert_id = get_expert_id(name)
+                name_layer_id, name_expert_id = get_expert_id(name)
                 if name_expert_id is not None and int(name_expert_id) != int(
                         expert_id):
                     continue
@@ -1330,7 +1358,10 @@ class HymetaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only, Supp
         def is_shared_mlp_weight(name: str) -> bool:
             return "shared_mlp" in name and not name.endswith(".bias")
         
-        def load_shared_mlp_weight(name: str, loaded_weight: torch.Tensor,
+        def is_densed_mlp_weight(name: str) -> bool:
+            return ".mlp." in name
+        
+        def load_mlp_weight(name: str, loaded_weight: torch.Tensor,
                                    self) -> None:
             if not self.CONCAT_FFN: # CONCAT_FFN is True by default
                 if "gate_proj" in name:
@@ -1428,11 +1459,16 @@ class HymetaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only, Supp
             loaded_params.add(name)
             return
 
+        warnings.warn(
+            f"The params of the model is: {list(params_dict.keys())}"
+        )
         for name, loaded_weight in weights:
             weight_at_layer = which_layer(name)
             if weight_at_layer and weight_at_layer >= self.config.num_hidden_layers:
                 continue
-
+            
+            if "mode." in name: # the checkpoint store model.norm wrongly as "mode.norm"
+                name = name.replace("mode.", "model.")
             # if is_layer_norm_weight(name):
             #     load_basic_weight(name, loaded_weight, self)
             #     continue
@@ -1446,8 +1482,8 @@ class HymetaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only, Supp
             if is_moe_weight(name):
                 load_sparse_moe_weight(name, loaded_weight, self)
                 continue
-            if is_shared_mlp_weight(name):
-                load_shared_mlp_weight(name, loaded_weight, self)
+            if is_shared_mlp_weight(name) or is_densed_mlp_weight(name):
+                load_mlp_weight(name, loaded_weight, self)
                 continue
 
             if "rotary_emb.inv_freq" in name:
