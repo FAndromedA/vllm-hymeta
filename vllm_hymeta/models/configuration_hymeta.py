@@ -75,6 +75,12 @@ class HymetaConfig(PretrainedConfig):
             0 if idx in self.full_attn_layers else sliding_window
             for idx in range(num_hidden_layers)
         ] # 在 meta_attention.py 中 0-1=-1 表示全局注意力
+
+        # File "/opt/conda/lib/python3.10/site-packages/vllm/config.py", line 1162, in get_num_layers_by_block_type
+        # [rank0]:     raise ValueError(
+        # [rank0]: ValueError: The model is an hybrid without alayers_block_type or an attn_type_list in the hf_config,cannot determine the num of attention layers
+        # 1 表示这一层有 softmax attention, 方便 vllm 管理 kv cache(因为我们是层内混合,所以都是1)
+        self.attn_type_list = [1 for _ in range(num_hidden_layers)]
         
         self.num_local_experts = num_local_experts
         self.num_layer_experts = [

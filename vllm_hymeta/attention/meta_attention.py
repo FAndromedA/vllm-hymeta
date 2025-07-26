@@ -281,7 +281,7 @@ class MetaAttentionMetadata(AttentionMetadata):
             encoder_seq_start_loc=self.encoder_seq_start_loc,
             max_encoder_seq_len=self.max_encoder_seq_len,
             cross_slot_mapping=self.cross_slot_mapping,
-            corss_block_tables=self.cross_block_tables
+            cross_block_tables=self.cross_block_tables
         )
         return self._cached_prefill_metadata
     
@@ -808,13 +808,21 @@ class MetaAttentionImpl(AttentionImpl):
         (num_prefill_query_tokens, num_prefill_kv_tokens,
          num_decode_query_tokens) = \
             get_num_prefill_decode_query_kv_tokens(attn_metadata, attn_type)
-        decode_query = query[num_prefill_query_tokens:]
-        decode_output = output[num_prefill_query_tokens:]
+        num_meta_prefill_tokens = num_prefill_query_tokens
+        if query2 is not None: # meta tokens 还没有 cache，所以需要一起 forward
+            num_meta_prefill_tokens += self.num_meta_tokens
+
+        decode_query = query[num_meta_prefill_tokens:]
+        decode_output = output[num_meta_prefill_tokens:]
         # QKV for prefill
-        query = query[:num_prefill_query_tokens]
-        prefill_output = output[:num_prefill_query_tokens]
-        assert query.shape[0] == num_prefill_kv_tokens
-        assert decode_query.shape[0] == num_decode_query_tokens
+        query = query[:num_meta_prefill_tokens]
+        prefill_output = output[:num_meta_prefill_tokens]
+        assert query.shape[0] == num_prefill_kv_tokens, \
+            f"query.shape: {query.shape}, " \
+            f"num_prefill_kv_tokens: {num_prefill_kv_tokens}"
+        assert decode_query.shape[0] == num_decode_query_tokens, \
+            f"decode_query.shape: {decode_query.shape}, " \
+            f"num_decode_query_tokens: {num_decode_query_tokens}"
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # prompt run
@@ -855,6 +863,10 @@ class MetaAttentionImpl(AttentionImpl):
                     k2=key2,
                     v1=value,
                     v2=value2,
+                    cu_seqlens_q=q_seq_start_loc,
+                    cu_seqlens_k=k_seq_start_loc,
+                    max_seqlen_q=q_seq_len,
+                    max_seqlen_k=k_seq_len,
                     num_meta_tokens=self.num_meta_tokens,
                     dropout_p=0.0,
                     softmax_scale=softmax_scale,

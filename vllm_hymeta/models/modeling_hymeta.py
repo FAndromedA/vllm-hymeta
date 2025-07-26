@@ -49,7 +49,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding
 )
-from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.models.utils import PPMissingLayer, is_pp_missing_parameter, make_layers, maybe_prefix
@@ -110,6 +109,7 @@ def weight_loader_with_alias(alias: str):
     return wrapper
 
 class HymetaRMSNormTP(CustomOp):
+    # 只有在 tensor parallel 后，以及 reduce 前的 RMSNorm 才需要这个 CustomOp
     name = "HymetaRMSNormTP"
 
     def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
@@ -294,6 +294,7 @@ class HymetaMoE(nn.Module):
             params_dtype=params_dtype,
             quant_config=None,
             prefix=f'{prefix}.gate',
+            return_bias=False
         )
         self.gate.weight.weight_loader = HymetaMoE.gate_weight_loader
 
@@ -428,10 +429,10 @@ class HLinearAttention(nn.Module):
         return
 
     def _prefill_and_mix_infer(self, q, k, v, g, kv_cache, has_meta_cache, 
-                               meta_cache, state_indices_tensor, attn_metadata):
+                            meta_cache, state_indices_tensor, attn_metadata, is_vllm_testing):
         hidden = []
         # 当前 layer 还没有计算过 meta_cache，则计算一遍，并一劳永逸
-        if has_meta_cache == False:
+        if has_meta_cache == False and not is_vllm_testing:
         # if self.num_meta_tokens > 0 and getattr(attn_metadata, "num_prefills", 0) > 0:
             _start = 0
             _end = self.num_meta_tokens
@@ -462,7 +463,8 @@ class HLinearAttention(nn.Module):
             if _prefill_idx >= len(state_indices_tensor):
                 break
             # 因为把 meta_tokens 插到了最前面，所以需要加上 num_meta_tokens，所有 prefill 请求共用。 
-            meta_tokens_offset = self.num_meta_tokens if not has_meta_cache else 0
+            meta_tokens_offset = self.num_meta_tokens \
+                            if (not has_meta_cache and not is_vllm_testing) else 0
             _start = attn_metadata.query_start_loc[_prefill_idx] + meta_tokens_offset
             _end = attn_metadata.query_start_loc[_prefill_idx + 1] + meta_tokens_offset  # 取出这个 prefill 请求的 tokens 范围
             slot_id = state_indices_tensor[_prefill_idx]
@@ -484,7 +486,7 @@ class HLinearAttention(nn.Module):
             # |---------- context_len ----------|
             # |-------------------- seq_len ---------------------|
             #                                   |-- query_len ---|
-            if attn_metadata.context_lens_tensor[_prefill_idx] == 0:
+            if attn_metadata.context_lens_tensor[_prefill_idx] == 0 and not is_vllm_testing:
                 initial_state = meta_cache.unsqueeze(0) # [1, num_heads, head_dim, head_dim]
 
             should_pad_dim = q_slice.dim() == 3
@@ -496,7 +498,8 @@ class HLinearAttention(nn.Module):
             o, recurrent_state = fused_chunk_gla(
                 q_slice, k_slice, v_slice, g_slice, initial_state=initial_state, output_final_state=True)
 
-            kv_cache[slot_id].copy_(recurrent_state) # [1, num_heads, head_dim, head_dim]
+            if not is_vllm_testing:
+                kv_cache[slot_id].copy_(recurrent_state.squeeze(0)) # [1, num_heads, head_dim, head_dim]
             hidden.append(rearrange(o.squeeze(0), 'h n d -> n (h d)').contiguous()) # [num_tokens, h*d]
 
         if attn_metadata.num_decode_tokens > 0: # 有需要解码的 tokens
@@ -528,6 +531,7 @@ class HLinearAttention(nn.Module):
         kv_caches: HymetaCacheParams,
         has_meta_cache: Optional[bool] = False,
         lower_bound: Optional[torch.Tensor] = None,
+        is_vllm_testing: Optional[bool] = False,
         **kwargs
     ) -> torch.Tensor:
         
@@ -536,9 +540,14 @@ class HLinearAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states) # [num_tokens, hidden_size]
         # qkv32 = qkv.to(torch.float32)
             # qkvact = torch.nn.functional.silu(qkv32)
-        qkvact = qkv.view((qkv.shape[0], self.tp_heads, -1)) # [num_tokens, num_heads, head_dim]
-        q, k, v = torch.split(qkvact, [self.q_size, self.kv_size, self.kv_size], dim=-1)
+        # qkvact = qkv.view(qkv.shape[0], self.tp_heads, -1) 
+        # q, k, v = torch.split(qkvact, [self.q_size, self.kv_size, self.kv_size], dim=-1)
         
+        q, k, v = torch.split(qkv, [self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q = q.reshape(q.shape[0], -1, self.head_dim) # [num_tokens, num_heads, head_dim]
+        k = k.reshape(k.shape[0], -1, self.head_dim) # [num_tokens, num_heads, head_dim]
+        v = v.reshape(v.shape[0], -1, self.head_dim) # [num_tokens, num_heads, head_dim]
+
         # 这里之后可以优化不 repeat_kv 
         k = repeat_kv(k, self.tp_heads // self.tp_kv_heads) # [num_tokens, num_heads, head_dim]
         v = repeat_kv(v, self.tp_heads // self.tp_kv_heads)
@@ -572,14 +581,15 @@ class HLinearAttention(nn.Module):
 
         decode_only = getattr(attn_metadata, "num_prefills", 0) == 0
 
-        outputs = []
+        # outputs = []
         if not decode_only:
             outputs = self._prefill_and_mix_infer(q, k, v, g, 
                                                 kv_cache, 
                                                 has_meta_cache,
                                                 meta_cache,
                                                 state_indices_tensor,
-                                                attn_metadata)
+                                                attn_metadata,
+                                                is_vllm_testing)
         else:
             outputs = self._decode(q, k, v, g, kv_cache, has_meta_cache,
                                         state_indices_tensor, attn_metadata)
@@ -682,6 +692,7 @@ class FlashAttention(nn.Module):
                 positions: torch.Tensor,
                 kv_caches: HymetaCacheParams,
                 has_meta_cache: Optional[bool] = False,
+                is_vllm_testing: bool = False,
                 **kwargs) -> torch.Tensor:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
@@ -691,25 +702,25 @@ class FlashAttention(nn.Module):
 
         q1, k1, v1 = q, k, v
         q2, k2, v2 = None, None, None
-        if (has_meta_cache == False) and (self.num_meta_tokens > 0):
+        if (has_meta_cache == False) and (self.num_meta_tokens > 0) and (is_vllm_testing == False):
             q1 = q1[self.num_meta_tokens:] # view is done in attn
             k1 = k1[self.num_meta_tokens:]
             v1 = v1[self.num_meta_tokens:]
             # 只有第一次处理 meta_tokens 时才会需要 q2 计算
             q2 = q[:self.num_meta_tokens].view(self.num_meta_tokens, self.num_heads, self.head_dim)
-
-            kv_caches.meta_linear_cache[0].copy_(
+            
+            kv_caches.meta_fattn_cache[0].copy_(
                 k[:self.num_meta_tokens].view(self.num_meta_tokens, self.num_kv_heads, self.head_dim)
             )
-            kv_caches.meta_linear_cache[1].copy_(
+            kv_caches.meta_fattn_cache[1].copy_(
                 v[:self.num_meta_tokens].view(self.num_meta_tokens, self.num_kv_heads, self.head_dim)
             )
         
         if self.num_meta_tokens > 0:
-            k2 = kv_caches.meta_linear_cache[0]
-            v2 = kv_caches.meta_linear_cache[1]
+            k2 = kv_caches.meta_fattn_cache[0]
+            v2 = kv_caches.meta_fattn_cache[1]
 
-        attn_output = self.attn(q, k, v, q2=q2, k2=k2, v2=v2)
+        attn_output = self.attn(q1, k1, v1, query2=q2, key2=k2, value2=v2)
         # output, _ = self.o_proj(attn_output)
         return attn_output
 
@@ -755,7 +766,8 @@ class IntraHybridAttention(nn.Module):
         )
 
         self.out_proj =  RowParallelLinear(
-            self.num_heads * self.head_dim, self.hidden_size, bias=False, prefix=f"{prefix}.out_proj")
+            self.num_heads * self.head_dim, self.hidden_size, 
+            bias=False, prefix=f"{prefix}.out_proj", return_bias=False)
         self.norm1 = HymetaRMSNormTP(hidden_size=config.hidden_size, eps=config.norm_eps)
         self.norm2 = HymetaRMSNormTP(hidden_size=config.hidden_size, eps=config.norm_eps)
 
@@ -767,13 +779,15 @@ class IntraHybridAttention(nn.Module):
         position_ids: Optional[torch.LongTensor] = None,
         kv_caches: HymetaCacheParams = None,
         has_meta_cache: Optional[bool] = False,
+        is_vllm_testing: bool = False,
         **kwargs,
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+    ) -> torch.FloatTensor:
         out_attn = self.vanilla_attn(
             hidden_states=hidden_states,
-            position_ids=position_ids,
+            positions=position_ids,
             has_meta_cache=has_meta_cache,
             kv_caches=kv_caches,
+            is_vllm_testing=is_vllm_testing,
             **kwargs
         )
 
@@ -782,10 +796,12 @@ class IntraHybridAttention(nn.Module):
             lower_bound=lower_bound,
             has_meta_cache=has_meta_cache,
             kv_caches=kv_caches,
+            is_vllm_testing=is_vllm_testing,
             **kwargs
         )
 
         hidden_states = (self.norm1(out_attn) + self.norm2(out_linear)) / 2
+        hidden_states = hidden_states.to(torch.bfloat16)
         hidden_states = self.out_proj(hidden_states)
 
         return hidden_states
@@ -804,7 +820,7 @@ class HybridBlock(nn.Module):
         self.layer_idx = layer_idx
         self.cache_config = cache_config
 
-        self.attn_norm = HymetaRMSNormTP(hidden_size=config.hidden_size, eps=config.norm_eps)
+        self.attn_norm = RMSNorm(hidden_size=config.hidden_size, eps=config.norm_eps)
         self.attn = IntraHybridAttention(
             config=config, 
             layer_idx=layer_idx,
@@ -872,6 +888,7 @@ class HybridBlock(nn.Module):
         position_ids: Optional[torch.LongTensor] = None,
         kv_caches: HymetaCacheParams = None,
         has_meta_cache: Optional[bool] = False,
+        is_vllm_testing: bool = False,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor]:
 
@@ -884,9 +901,10 @@ class HybridBlock(nn.Module):
             position_ids=position_ids,
             has_meta_cache=has_meta_cache,
             kv_caches=kv_caches,
+            is_vllm_testing=is_vllm_testing,
             **kwargs
         )
-        hidden_states, residual = self.mlp_norm(hidden_states, residual, True)
+        hidden_states, residual = self.mlp_norm(hidden_states, residual)
         if self.expert_num == 1:
             hidden_states = self.mlp(hidden_states)
         else:
@@ -1022,7 +1040,7 @@ class HymetaModel(nn.Module):
             # prefix=f"{prefix}.rotary_emb",
         )
         if get_pp_group().is_last_rank:
-            self.norm = HymetaRMSNormTP(hidden_size=config.hidden_size, eps=config.norm_eps)
+            self.norm = RMSNorm(hidden_size=config.hidden_size, eps=config.norm_eps)
         else:
             self.norm = PPMissingLayer()
 
@@ -1129,6 +1147,16 @@ class HymetaModel(nn.Module):
             hidden_states = intermediate_tensors['hidden_states']
             residual = intermediate_tensors['residual']
         
+        is_vllm_testing = False
+        if attn_metadata.num_prefill_tokens + \
+            attn_metadata.num_decode_tokens == hidden_states.shape[0] and \
+                self.has_meta_cache is False:
+            # 这是 vllm 一开始的测试运行, 由于 pipeline parallel 它是并行一起测试的
+            # 所以 hidden_states 并不是来源于上一层 pipeline，因此没有上一层的 meta tokens
+            assert get_pp_group().is_first_rank is False
+            is_vllm_testing = True
+            
+
         attn_metadata.rotary_emb = self.rotary_emb
 
         if self.use_lower_bound:
@@ -1149,19 +1177,34 @@ class HymetaModel(nn.Module):
             _caches = hymeta_cache_params.at_layer_idx(i)
 
             lower_bound = lower_bounds[i] if self.use_lower_bound else None
-
+            
+            # JUST FOR DEBUGGING
+            warnings.warn(
+                f"hidden_states at layer {i} shape {hidden_states.shape}, "
+                f"lower_bound: {lower_bound}, "
+                f"has_meta_cache: {self.has_meta_cache}, "
+                f"input_meta_tokens: {input_meta_tokens}, "
+                f"get_pp_group().is_last_rank: {get_pp_group().is_last_rank}, "
+            )# hidden_states.shape[0] == 128128, \
+            # assert i == 0, \
+            #     f"hidden_states at layer {i} shape {hidden_states.shape} is not expected, " \
+            #     f"it should be 128128, but got {hidden_states.shape[0]}, pp_group_rank: {get_pp_group().rank}, " \
+            #     f"has_meta_cache: {self.has_meta_cache}, input_meta_tokens: {input_meta_tokens}, " \
+            #     f"get_pp_group().is_last_rank: {get_pp_group().is_last_rank}, "
             hidden_states, residual = layer(
                 hidden_states=hidden_states,
+                attn_metadata=attn_metadata,
                 lower_bound=lower_bound,
                 position_ids=new_positions,
                 kv_caches=_caches,
                 has_meta_cache=self.has_meta_cache,
-                attn_metadata=attn_metadata,
-                residual=residual, # 没用
+                is_vllm_testing=is_vllm_testing,
+                # residual=residual, # 没用
             )
         
         # After the first forward pass, we can set has_meta_cache to True
-        self.has_meta_cache = True
+        if not is_vllm_testing:
+            self.has_meta_cache = True
 
         if not get_pp_group().is_last_rank:
             # 不能去掉前面的 meta token 因为下一个 pipeline stage可能需要

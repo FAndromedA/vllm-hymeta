@@ -195,7 +195,7 @@ class MetaAttention(nn.Module):
                 self.calc_kv_scales(query, key, value)
         if self.use_output:
             output_shape = (output_shape
-                            if output_shape is not None else query.shape)
+                            if output_shape is not None else (query.shape if query2 is None else torch.Size([query.shape[0] + query2.shape[0], query.shape[1]])))
             output = torch.empty(output_shape,
                                  dtype=query.dtype,
                                  device=query.device)

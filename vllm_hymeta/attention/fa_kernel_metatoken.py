@@ -174,11 +174,12 @@ class FlashAttentionWithMetaToken(torch.autograd.Function):
 
         out1, lse1 = out1[0], out1[1]
 
-        q = torch.cat((q1, q2), dim=1) if q2 is not None else q1
+        q = torch.cat((q1, q2), dim=0) if q2 is not None else q1
+        q = q.to(torch.bfloat16)
         out2 = _flash_attn_forward(
-            q,
-            k2,
-            v2,
+            q.unsqueeze(0),
+            k2.unsqueeze(0),
+            v2.unsqueeze(0),
             dropout_p=dropout_p,
             softmax_scale=softmax_scale,
             causal=False,
@@ -223,17 +224,17 @@ class FlashAttentionVarlenWithMetaToken(torch.autograd.Function):
         deterministic,
         return_attn_probs,
     ):
-        Lq, Lk = q1.shape[1], k1.shape[1]
+        Lq, Lk = q1.shape[0], k1.shape[0] # [num_tokens, num_heads, head_dim]
         if softmax_scale is None:
             softmax_scale = q1.shape[-1] ** (-0.5)
         assert causal and window_size[1] in [0, -1]
-        assert num_meta_tokens == k2.shape[1]
+        assert num_meta_tokens == k2.shape[0]
         if q2 is not None:
             assert Lq == Lk, "meta_tokens' query doesn't support decoding"
-            assert num_meta_tokens == q2.shape[1]
-
+            assert num_meta_tokens == q2.shape[0]
+        
         out1 = _flash_attn_varlen_forward(
-            q1.squeeze(0),
+            q1.squeeze(0), # q must have shape (batch_size, seqlen_q, num_heads, head_size_og)
             k1.squeeze(0),
             v1.squeeze(0),
             cu_seqlens_q=cu_seqlen_q,
@@ -247,16 +248,19 @@ class FlashAttentionVarlenWithMetaToken(torch.autograd.Function):
             alibi_slopes=alibi_slopes,
             return_softmax=return_attn_probs,
             softcap=softcap,
-            block_tables=block_tables,
+            block_table=block_tables,
         )
         out1, lse1 = out1[0].unsqueeze(0), out1[5]
-        lse1 = rearrange(lse1, "b h l -> 1 h (b l)").contiguous()
-
-        q = torch.cat((q1, q2), dim=1) if q2 is not None else q1
+        # lse1 = rearrange(lse1, "b h l -> 1 h (b l)").contiguous()
+        lse1 = lse1.unsqueeze(0).contiguous()  # [1, num_heads, num_tokens]
+ 
+        q = torch.cat((q1, q2), dim=0) if q2 is not None else q1 # [num_tokens, num_heads, head_dim]
+        q = q.to(torch.bfloat16)
+        
         out2 = _flash_attn_forward(
-            q,
-            k2,
-            v2,
+            q.unsqueeze(0), # q must have shape (batch_size, seqlen_q, num_heads, head_size_og)
+            k2.unsqueeze(0),
+            v2.unsqueeze(0),
             dropout_p=dropout_p,
             softmax_scale=softmax_scale,
             causal=False, # ? 官方实现不一样 https://github.com/NVlabs/hymba/blob/main/barebones_hymba/barebones_hymba_block.py
@@ -268,8 +272,10 @@ class FlashAttentionVarlenWithMetaToken(torch.autograd.Function):
         )
         out2, lse2 = out2[0], out2[5]
         out, lse = _update_out_and_lse(out1, lse1, out2[:,:Lq], lse2[:,:,:Lq])
-
+        # print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++" \
+        #      f"out shape: {out.shape}, lse shape: {lse.shape}, out2 shape: {out2.shape}, lse2 shape: {lse2.shape}")
         out = torch.cat((out, out2[:, Lq:]), dim=1) if q2 is not None else out
+        # print(f"----------------------------------------------------after concat out shape: {out.shape}, q2 shape: {q2.shape if q2 is not None else None}")
         return out
 
 def metatoken_flash_attn_with_kvcache(
