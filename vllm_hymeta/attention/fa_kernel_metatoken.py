@@ -127,17 +127,11 @@ class FlashAttentionWithMetaToken(torch.autograd.Function):
         ctx,
         q1,
         q2,
-        k1,
         k2,
-        v1,
         v2,
         key_cache,
         value_cache,
-        cu_seqlens_q,
-        max_seqlen_q,
         cache_seqlens,
-        seqused_k,
-        max_seqlen_k,
         num_meta_tokens,
         dropout_p,
         softmax_scale,
@@ -150,18 +144,18 @@ class FlashAttentionWithMetaToken(torch.autograd.Function):
         deterministic,
         return_attn_probs,
     ):
-        Lq, Lk = q1.shape[1], k1.shape[1]
+        Lq, Lk = q1.shape[0], key_cache.shape[0]
         if softmax_scale is None:
             softmax_scale = q1.shape[-1] ** (-0.5)
         assert causal and window_size[1] in [0, -1]
-        assert num_meta_tokens == k2.shape[1]
+        assert num_meta_tokens == k2.shape[0]
         if q2 is not None:
             assert Lq == Lk, "meta_tokens' query doesn't support decoding"
-            assert num_meta_tokens == q2.shape[1]
-
+            assert num_meta_tokens == q2.shape[0]
+        # print("Shape of q1: ", q1.shape, " Shape of k2: ", k2.shape, " Shape of key_cache: ", key_cache.shape, "block_tables: ", block_tables.shape if block_tables is not None else None)
         out1 = my_flash_attn_with_kvcache(
-            q=q1,
-            k_cache=key_cache,
+            q=q1.unsqueeze(1), # q must have shape (batch_size, seqlen_q, num_heads, head_size_og)
+            k_cache=key_cache, # key_cache.shape: torch.Size([32092, 16, 2, 128]
             v_cache=value_cache,
             block_table=block_tables,
             cache_seqlens=cache_seqlens,
@@ -173,7 +167,7 @@ class FlashAttentionWithMetaToken(torch.autograd.Function):
         )
 
         out1, lse1 = out1[0], out1[1]
-
+        # print(" Shape of out1: ", out1.shape, " lse1: ", lse1.shape)
         q = torch.cat((q1, q2), dim=0) if q2 is not None else q1
         q = q.to(torch.bfloat16)
         out2 = _flash_attn_forward(
@@ -281,9 +275,7 @@ class FlashAttentionVarlenWithMetaToken(torch.autograd.Function):
 def metatoken_flash_attn_with_kvcache(
     q1,
     q2,
-    k1,
     k2,
-    v1,
     v2,
     key_cache=None,
     value_cache=None,
@@ -303,9 +295,7 @@ def metatoken_flash_attn_with_kvcache(
     return FlashAttentionWithMetaToken.apply(
         q1,
         q2,
-        k1,
         k2,
-        v1,
         v2,
         key_cache,
         value_cache,

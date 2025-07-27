@@ -60,14 +60,14 @@ def my_fused_recurrent_fwd_kernel(
     q = tl.load(q_ptr + q_offset + qk_d_offsets, mask=qk_mask, other=0.0) * scale
     k = tl.load(k_ptr + k_offset + qk_d_offsets, mask=qk_mask, other=0.0)
     v = tl.load(v_ptr + v_offset + v_d_offsets, mask=v_mask, other=0.0)
-    g = tl.load(g_ptr + q_offset + qk_d_offsets, mask=qk_mask, other=0.0)
+    g = tl.load(g_ptr + k_offset + qk_d_offsets, mask=qk_mask, other=0.0)
 
     # Compute key-value outer product
     kv_outer = k[:, None] * v[None, :]
     kv_mask = qk_mask[:, None] & v_mask[None, :]
 
     # Apply decay factor to previous KV cache
-    ratio = tl.exp(g[None, :])
+    ratio = tl.exp(g[:, None])
     kv_ptr = kv_cache_ptr + cache_offset + cache_d_offsets
     kv_cache_old = tl.load(kv_ptr, mask=kv_mask, other=0.0)
     kv_cache_new = kv_outer + ratio * kv_cache_old

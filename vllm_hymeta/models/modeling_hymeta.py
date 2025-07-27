@@ -513,9 +513,9 @@ class HLinearAttention(nn.Module):
         hidden = torch.concat(hidden, dim=0).contiguous() # [num_tokens, h*d]
         return hidden
     
-    def _decode(self, q, k, v, g, kv_cache, has_meta_cache, state_indices_tensor, attn_metadata):
+    def _decode(self, q, k, v, g, kv_cache, has_meta_cache, state_indices_tensor, attn_metadata, is_vllm_testing):
         # 因为解码的请求的长度都是 1， 这里的 num_tokens 维度等效于 batch 维度(同时处理多个解码请求)
-        meta_tokens_offset = self.num_meta_tokens if not has_meta_cache else 0
+        meta_tokens_offset = self.num_meta_tokens if (not has_meta_cache and not is_vllm_testing) else 0
         _start = attn_metadata.num_prefill_tokens + meta_tokens_offset
         q = q[_start:].unsqueeze(2).contiguous() # [num_tokens, num_heads, 1, head_dim]
         k = k[_start:].unsqueeze(2).contiguous()
@@ -592,7 +592,7 @@ class HLinearAttention(nn.Module):
                                                 is_vllm_testing)
         else:
             outputs = self._decode(q, k, v, g, kv_cache, has_meta_cache,
-                                        state_indices_tensor, attn_metadata)
+                                state_indices_tensor, attn_metadata, is_vllm_testing)
         
         return outputs
 
@@ -799,7 +799,8 @@ class IntraHybridAttention(nn.Module):
             is_vllm_testing=is_vllm_testing,
             **kwargs
         )
-
+        # print(f"out_attn: {out_attn.shape}, out_linear: {out_linear.shape}, hidden_states: {hidden_states.shape}\n"
+        #       f"num_prefills: {getattr(attn_metadata, 'num_prefills', 0)}, num_decode_tokens: {getattr(attn_metadata, 'num_decode_tokens', 0)}")
         hidden_states = (self.norm1(out_attn) + self.norm2(out_linear)) / 2
         hidden_states = hidden_states.to(torch.bfloat16)
         hidden_states = self.out_proj(hidden_states)
@@ -1181,11 +1182,11 @@ class HymetaModel(nn.Module):
             # JUST FOR DEBUGGING
             warnings.warn(
                 f"hidden_states at layer {i} shape {hidden_states.shape}, "
-                f"lower_bound: {lower_bound}, "
                 f"has_meta_cache: {self.has_meta_cache}, "
                 f"input_meta_tokens: {input_meta_tokens}, "
                 f"get_pp_group().is_last_rank: {get_pp_group().is_last_rank}, "
-            )# hidden_states.shape[0] == 128128, \
+            )
+            # hidden_states.shape[0] == 128128, \
             # assert i == 0, \
             #     f"hidden_states at layer {i} shape {hidden_states.shape} is not expected, " \
             #     f"it should be 128128, but got {hidden_states.shape[0]}, pp_group_rank: {get_pp_group().rank}, " \

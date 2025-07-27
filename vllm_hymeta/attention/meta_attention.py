@@ -954,14 +954,12 @@ class MetaAttentionImpl(AttentionImpl):
                 ) = get_seq_len_block_table_args(decode_meta, False, attn_type)
                 # descale_shape = (seq_lens_arg.shape[0], key_cache.shape[-2])
                 decode_output = metatoken_flash_attn_with_kvcache(
-                    q1=decode_query.unsqueeze(1),
+                    q1=decode_query,
                     q2=query2,
-                    k1=None,
                     k2=key2,
-                    v1=None,
                     v2=value2,
-                    k_cache=key_cache,
-                    v_cache=value_cache,
+                    key_cache=key_cache,
+                    value_cache=value_cache,
                     cache_seqlens=seq_lens_arg,
                     num_meta_tokens=self.num_meta_tokens,
                     dropout_p=0.0,
