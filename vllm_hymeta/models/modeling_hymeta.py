@@ -1014,7 +1014,12 @@ class HymetaModel(nn.Module):
         _dummy = torch.zeros(1)
         self._dtype = _dummy.dtype
         del _dummy
-        self.has_meta_cache = False # Become True after the first forward pass through all layers.
+
+        self.has_meta_cache = 0 # Become True after the first forward pass through all layers.
+        self.meta_cache_threshold = 2 # if enforce_eager else 37
+        # but when the vllm is launching, it will run several times ignoring the order of pipelines
+        # so we must set it True until it has run beyond a threshold, here we let it be 2 if --enforce-eager
+        # else we let it be 1(128k) + 256/8(256,248,...,8) + 3(4, 2, 1) + 1(True request) = 1 + 32 + 3 = 37
         self.hymeta_cache = HymetaCacheManager(
             dtype=torch.bfloat16,
             cache_shape=self.cache_shape,
@@ -1128,7 +1133,7 @@ class HymetaModel(nn.Module):
         # if input_meta_tokens:
         #     meta_tokens = repeat(self.meta_tokens, 'n d -> b n d', b = batch_size)
         #     inputs_embeds = torch.cat((meta_tokens, inputs_embeds), dim=1)
-        input_meta_tokens = (self.num_meta_tokens > 0) and (self.has_meta_cache == False)
+        input_meta_tokens = (self.num_meta_tokens > 0) and (self.has_meta_cache < self.meta_cache_threshold)
         # (getattr(attn_metadata, "num_prefills", 0) > 0) # 不管有没有 prefill 都要
 
         if get_pp_group().is_first_rank:
@@ -1151,7 +1156,7 @@ class HymetaModel(nn.Module):
         is_vllm_testing = False
         if attn_metadata.num_prefill_tokens + \
             attn_metadata.num_decode_tokens == hidden_states.shape[0] and \
-                self.has_meta_cache is False:
+                self.has_meta_cache < self.meta_cache_threshold:
             # 这是 vllm 一开始的测试运行, 由于 pipeline parallel 它是并行一起测试的
             # 所以 hidden_states 并不是来源于上一层 pipeline，因此没有上一层的 meta tokens
             assert get_pp_group().is_first_rank is False
@@ -1198,14 +1203,15 @@ class HymetaModel(nn.Module):
                 lower_bound=lower_bound,
                 position_ids=new_positions,
                 kv_caches=_caches,
-                has_meta_cache=self.has_meta_cache,
+                has_meta_cache=(self.has_meta_cache >= self.meta_cache_threshold),
                 is_vllm_testing=is_vllm_testing,
                 # residual=residual, # 没用
             )
         
         # After the first forward pass, we can set has_meta_cache to True
-        if not is_vllm_testing:
-            self.has_meta_cache = True
+        self.has_meta_cache = min(254, self.has_meta_cache + 1)
+        # if not is_vllm_testing:
+        #     self.has_meta_cache = True
 
         if not get_pp_group().is_last_rank:
             # 不能去掉前面的 meta token 因为下一个 pipeline stage可能需要

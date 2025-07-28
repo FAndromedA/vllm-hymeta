@@ -2,3 +2,4 @@
 **/dist/
 **/build/
 **/vllm_hymeta.egg-info/
+**/*nohup.log*/

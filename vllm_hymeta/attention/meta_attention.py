@@ -812,14 +812,14 @@ class MetaAttentionImpl(AttentionImpl):
         if query2 is not None: # meta tokens 还没有 cache，所以需要一起 forward
             num_meta_prefill_tokens += self.num_meta_tokens
 
-        decode_query = query[num_meta_prefill_tokens:]
+        decode_query = query[num_prefill_query_tokens:]
         decode_output = output[num_meta_prefill_tokens:]
         # QKV for prefill
-        query = query[:num_meta_prefill_tokens]
+        query = query[:num_prefill_query_tokens]
         prefill_output = output[:num_meta_prefill_tokens]
-        assert query.shape[0] == num_prefill_kv_tokens, \
+        assert query.shape[0] == num_prefill_query_tokens, \
             f"query.shape: {query.shape}, " \
-            f"num_prefill_kv_tokens: {num_prefill_kv_tokens}"
+            f"num_prefill_query_tokens: {num_prefill_query_tokens}"
         assert decode_query.shape[0] == num_decode_query_tokens, \
             f"decode_query.shape: {decode_query.shape}, " \
             f"num_decode_query_tokens: {num_decode_query_tokens}"

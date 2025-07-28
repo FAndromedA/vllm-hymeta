@@ -228,9 +228,9 @@ class FlashAttentionVarlenWithMetaToken(torch.autograd.Function):
             assert num_meta_tokens == q2.shape[0]
         
         out1 = _flash_attn_varlen_forward(
-            q1.squeeze(0), # q must have shape (batch_size, seqlen_q, num_heads, head_size_og)
-            k1.squeeze(0),
-            v1.squeeze(0),
+            q1,
+            k1,
+            v1,
             cu_seqlens_q=cu_seqlen_q,
             cu_seqlens_k=cu_seqlen_k,
             max_seqlen_q=max_seqlen_q,
