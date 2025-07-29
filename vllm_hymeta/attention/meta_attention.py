@@ -492,10 +492,10 @@ class MetaAttentionMetadataBuilder(
             block_tables: List[List[int]]) -> torch.Tensor:
         # The shape of graph_block_tables is
         # [max batch size, max context len // block_size]
-        max_batch_size, max_blocks = self.runner.get_graph_batch_size()
+        max_batch_size, max_blocks = self.runner.graph_block_tables.shape
         assert max_batch_size >= num_seqs
 
-        graph_block_tables = self.runner.get_graph_block_tables[:num_seqs]
+        graph_block_tables = self.runner.graph_block_tables[:num_seqs]
         for i, block_table in enumerate(block_tables):
             if block_table:
                 num_blocks = len(block_table)
@@ -813,10 +813,10 @@ class MetaAttentionImpl(AttentionImpl):
             num_meta_prefill_tokens += self.num_meta_tokens
 
         decode_query = query[num_prefill_query_tokens:]
-        decode_output = output[num_meta_prefill_tokens:]
+        # decode_output = output[num_meta_prefill_tokens:]
         # QKV for prefill
         query = query[:num_prefill_query_tokens]
-        prefill_output = output[:num_meta_prefill_tokens]
+        # prefill_output = output[:num_meta_prefill_tokens]
         assert query.shape[0] == num_prefill_query_tokens, \
             f"query.shape: {query.shape}, " \
             f"num_prefill_query_tokens: {num_prefill_query_tokens}"
@@ -856,7 +856,8 @@ class MetaAttentionImpl(AttentionImpl):
                     value = value.reshape((num_key_tokens, num_kv_heads, head_size))
                 
                 # descale_shape = (q_seq_start_loc.shape[0] -1, key.shape[1])
-                prefill_output = metatoken_flash_attn_varlen_func(
+
+                output[:num_meta_prefill_tokens] = metatoken_flash_attn_varlen_func(  # prefill_output
                     q1=query,
                     q2=query2,
                     k1=key,
@@ -889,7 +890,7 @@ class MetaAttentionImpl(AttentionImpl):
                 #     prefill_meta.query_start_loc.shape[0] - 1,
                 #     key.shape[1]
                 # )
-                prefill_output = metatoken_flash_attn_varlen_func(
+                output[:num_meta_prefill_tokens] = metatoken_flash_attn_varlen_func( # prefill_output
                     q1=query,
                     q2=query2,
                     k1=key,
@@ -922,7 +923,7 @@ class MetaAttentionImpl(AttentionImpl):
                 #     decode_meta.query_start_loc.shape[0] - 1,
                 #     key.shape[1]
                 # )
-                decode_output = metatoken_flash_attn_varlen_func(
+                output[num_meta_prefill_tokens:] = metatoken_flash_attn_varlen_func(  # decode_output
                     q1=decode_query,
                     q2=query2,
                     k1=key_cache,
@@ -953,7 +954,7 @@ class MetaAttentionImpl(AttentionImpl):
                     block_tables_arg,
                 ) = get_seq_len_block_table_args(decode_meta, False, attn_type)
                 # descale_shape = (seq_lens_arg.shape[0], key_cache.shape[-2])
-                decode_output = metatoken_flash_attn_with_kvcache(
+                output[num_meta_prefill_tokens:] = metatoken_flash_attn_with_kvcache(  # decode_output
                     q1=decode_query,
                     q2=query2,
                     k2=key2,
@@ -969,7 +970,7 @@ class MetaAttentionImpl(AttentionImpl):
                     alibi_slopes=alibi_slopes,
                     block_tables=block_tables_arg,
                     softcap=logits_soft_cap,
-                )
+                ).squeeze(1)
         return output
 
 

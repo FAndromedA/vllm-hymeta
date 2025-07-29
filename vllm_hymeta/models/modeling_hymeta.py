@@ -63,6 +63,9 @@ from .hymeta_cache import HymetaCacheManager, HymetaCacheParams
 from .configuration_hymeta import HymetaConfig
 from .attention import MetaAttention
 
+import logging 
+logger = logging.getLogger(__name__)
+
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
     This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
@@ -92,21 +95,21 @@ def replace_weight_name(name: str,
         name.replace(key, to, count=count)
     return name
 
-def weight_loader_with_alias(alias: str):
+# def weight_loader_with_alias(alias: str):
 
-    def wrapper(func: callable):
+#     def wrapper(func: callable):
 
-        def inner_func(param: torch.Tensor,
-                       loaded_weight: torch.Tensor,
-                       *args,
-                       prefix: str = None,
-                       **kwargs):
-            value = func(param, loaded_weight, *args, **kwargs)
-            return value
+#         def inner_func(param: torch.Tensor,
+#                        loaded_weight: torch.Tensor,
+#                        *args,
+#                        prefix: str = None,
+#                        **kwargs):
+#             value = func(param, loaded_weight, *args, **kwargs)
+#             return value
         
-        return inner_func
+#         return inner_func
     
-    return wrapper
+#     return wrapper
 
 class HymetaRMSNormTP(CustomOp):
     # 只有在 tensor parallel 后，以及 reduce 前的 RMSNorm 才需要这个 CustomOp
@@ -338,10 +341,15 @@ class HymetaMoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
-        # router_logits_fp32, _ = self.gate(hidden_states.to(torch.float32))
-        # final_hidden_states = self.experts(
-        #     hidden_states, router_logits_fp32.to(hidden_states.dtype))
         router_logits = self.gate(hidden_states)
+        # print(f"HymetaMoE {self.layer_idx} forward, "
+        #        f"hidden_states has nan: {torch.isnan(hidden_states).any()}, "
+        #        f"router_logits has nan: {torch.isnan(router_logits).any()}, "
+        #        f"hidden_states sample: {hidden_states[:5, :5]},"
+        #        f"router_logits sample: {router_logits[:5, :5]},"
+        #        f"hidden_states max/min:", hidden_states.max(), hidden_states.min(),
+        #        f"router_logits max/min:", router_logits.max(), router_logits.min()
+        #        )
         final_hidden_states = self.experts(
             hidden_states, router_logits.to(hidden_states.dtype))
         final_hidden = final_hidden_states.view(num_tokens, hidden_size)
@@ -699,7 +707,13 @@ class FlashAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states) # [num_tokens, hidden_size]
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = attn_metadata.rotary_emb(positions, q, k)
-
+        # warnings.warn(f"FlashAttention{self.layer_idx} before forward, "
+        #       f"q shape: {q.shape}, k shape: {k.shape}, v shape: {v.shape}, "
+        #       f"q has nan: {torch.isnan(q).any()}, min/max: {q.min()}/{q.max()}, "
+        #       f"k has nan: {torch.isnan(k).any()}, min/max: {k.min()}/{k.max()}, "
+        #       f"v has nan: {torch.isnan(v).any()}, min/max: {v.min()}/{v.max()}, "
+        #       f"hidden_states has nan: {torch.isnan(hidden_states).any()}, min/max: {hidden_states.min()}/{hidden_states.max()}, "
+        #        )
         q1, k1, v1 = q, k, v
         q2, k2, v2 = None, None, None
         if (has_meta_cache == False) and (self.num_meta_tokens > 0) and (is_vllm_testing == False):
@@ -721,7 +735,13 @@ class FlashAttention(nn.Module):
             v2 = kv_caches.meta_fattn_cache[1]
 
         attn_output = self.attn(q1, k1, v1, query2=q2, key2=k2, value2=v2)
-        # output, _ = self.o_proj(attn_output)
+        # warnings.warn(f"FlashAttention{self.layer_idx} after forward, "
+        #       f"attn_output shape: {attn_output.shape}, "
+        #       f"attn_output has nan: {torch.isnan(attn_output).any()}, "
+        #       f"attn_output min/max: {attn_output.min()}/{attn_output.max()}, "
+        #       f"attn_output all zeros: {torch.all(attn_output == 0)}, "
+        # )
+        
         return attn_output
 
 class IntraHybridAttention(nn.Module):
@@ -799,8 +819,16 @@ class IntraHybridAttention(nn.Module):
             is_vllm_testing=is_vllm_testing,
             **kwargs
         )
-        # print(f"out_attn: {out_attn.shape}, out_linear: {out_linear.shape}, hidden_states: {hidden_states.shape}\n"
-        #       f"num_prefills: {getattr(attn_metadata, 'num_prefills', 0)}, num_decode_tokens: {getattr(attn_metadata, 'num_decode_tokens', 0)}")
+        # warnings.warn(f"IntraHybridAttention{self.layer_idx}, out_attn: {out_attn.shape}, out_linear: {out_linear.shape}, hidden_states: {hidden_states.shape}\n"
+        #         f"out_attn has nan: {torch.isnan(out_attn).any()}, "
+        #         f"out_linear has nan: {torch.isnan(out_linear).any()}, "
+        #         f"hidden_states has nan: {torch.isnan(hidden_states).any()}, "
+        #         f"out_attn sample: {out_attn[:5, :5]}, "
+        #         f"out_linear sample: {out_linear[:5, :5]}, "
+        #         f"hidden_states sample: {hidden_states[:5, :5]}, "
+        #         f"hidden_states max/min:", hidden_states.max(), hidden_states.min()
+        #        )
+
         hidden_states = (self.norm1(out_attn) + self.norm2(out_linear)) / 2
         hidden_states = hidden_states.to(torch.bfloat16)
         hidden_states = self.out_proj(hidden_states)
@@ -905,15 +933,21 @@ class HybridBlock(nn.Module):
             is_vllm_testing=is_vllm_testing,
             **kwargs
         )
-        hidden_states, residual = self.mlp_norm(hidden_states, residual)
+        norm_hidden_states, residual = self.mlp_norm(hidden_states, residual)
+        # print(f"HybridBlock {self.layer_idx} forward before moe, "
+        #       f"hidden_states: {hidden_states.shape}, has nan: {torch.isnan(hidden_states).any()}, "
+        #       f"hidden_states sample: {hidden_states[:5, :5]}, min/max: {hidden_states.min()}/{hidden_states.max()}, ")
         if self.expert_num == 1:
-            hidden_states = self.mlp(hidden_states)
+            hidden_states = self.mlp(norm_hidden_states)
+            # print(f"HybridBlock {self.layer_idx} forward after moe, "
+            #   f"hidden_states: {hidden_states.shape}, has nan: {torch.isnan(hidden_states).any()}, "
+            #   f"hidden_states sample: {hidden_states[:5, :5]}")
         else:
-            moe_hidden_states = self.block_sparse_moe(copy.deepcopy(hidden_states))
+            moe_hidden_states = self.block_sparse_moe(copy.deepcopy(norm_hidden_states))
             if self.shared_moe:
-                before_moe_dtype = hidden_states.dtype
+                before_moe_dtype = norm_hidden_states.dtype
                 # moe_hidden_fp32 = moe_hidden_states.to(torch.float32)
-                shared_mlp_out = self.shared_mlp(hidden_states).to(before_moe_dtype)
+                shared_mlp_out = self.shared_mlp(norm_hidden_states).to(before_moe_dtype)
 
                 # no coef
                 # hidden_states = shared_mlp_out + moe_hidden_fp32
@@ -928,7 +962,13 @@ class HybridBlock(nn.Module):
                 # hidden_states = hidden_states.to(before_moe_dtype)
             else:
                 hidden_states = moe_hidden_states
-
+            # print(f"HybridBlock {self.layer_idx} forward after moe, "
+            #       f"hidden_states: {hidden_states.shape}, has nan: {torch.isnan(hidden_states).any()}, "
+            #       f"hidden_states sample: {hidden_states[:5, :5]}, "
+            #       f"moe_hidden_states: {moe_hidden_states.shape}, has nan: {torch.isnan(moe_hidden_states).any()},"
+            #       f"moe_hidden_states sample: {moe_hidden_states[:5, :5]}, all zeros: {torch.all(moe_hidden_states == 0)}, "
+            #       f"shared_mlp_out: {shared_mlp_out.shape}, has nan: {torch.isnan(shared_mlp_out).any()},"
+            #       f"shared_mlp_out sample: {shared_mlp_out[:5, :5]}")
         hidden_states = residual + hidden_states
 
         return hidden_states, None
@@ -1016,10 +1056,10 @@ class HymetaModel(nn.Module):
         del _dummy
 
         self.has_meta_cache = 0 # Become True after the first forward pass through all layers.
-        self.meta_cache_threshold = 2 # if enforce_eager else 37
+        self.meta_cache_threshold = 1 if get_pp_group().is_first_rank else 37 # if enforce_eager else 37
         # but when the vllm is launching, it will run several times ignoring the order of pipelines
         # so we must set it True until it has run beyond a threshold, here we let it be 2 if --enforce-eager
-        # else we let it be 1(128k) + 256/8(256,248,...,8) + 3(4, 2, 1) + 1(True request) = 1 + 32 + 3 = 37
+        # else we let it be 1(128k) + 256/8(256,248,...,8) + 3(4, 2, 1) + 1(True request) = 1 + 32 + 3 + 1 = 37
         self.hymeta_cache = HymetaCacheManager(
             dtype=torch.bfloat16,
             cache_shape=self.cache_shape,
@@ -1185,18 +1225,14 @@ class HymetaModel(nn.Module):
             lower_bound = lower_bounds[i] if self.use_lower_bound else None
             
             # JUST FOR DEBUGGING
-            warnings.warn(
-                f"hidden_states at layer {i} shape {hidden_states.shape}, "
-                f"has_meta_cache: {self.has_meta_cache}, "
-                f"input_meta_tokens: {input_meta_tokens}, "
-                f"get_pp_group().is_last_rank: {get_pp_group().is_last_rank}, "
-            )
-            # hidden_states.shape[0] == 128128, \
-            # assert i == 0, \
-            #     f"hidden_states at layer {i} shape {hidden_states.shape} is not expected, " \
-            #     f"it should be 128128, but got {hidden_states.shape[0]}, pp_group_rank: {get_pp_group().rank}, " \
-            #     f"has_meta_cache: {self.has_meta_cache}, input_meta_tokens: {input_meta_tokens}, " \
+            # warnings.warn(
+            #     f"hidden_states at layer {i} shape {hidden_states.shape}, "
+            #     f"hidden_states sample: {hidden_states[:5, :5]}, "
+            #     f"has_meta_cache: {self.has_meta_cache}, "
+            #     f"input_meta_tokens: {input_meta_tokens}, "
             #     f"get_pp_group().is_last_rank: {get_pp_group().is_last_rank}, "
+            # )
+
             hidden_states, residual = layer(
                 hidden_states=hidden_states,
                 attn_metadata=attn_metadata,
@@ -1219,7 +1255,12 @@ class HymetaModel(nn.Module):
             #     hidden_states = hidden_states[self.num_meta_tokens:, :]
             return IntermediateTensors({
                 "hidden_states": hidden_states,
-                "residual": residual
+                "residual":
+                    torch.zeros(hidden_states.shape, dtype=hidden_states.dtype, device=hidden_states.device),
+                # "residual": residual # None 就别传
+                # File "/opt/conda/lib/python3.10/site-packages/vllm/worker/model_runner.py", line 2042, in forward
+                # self.input_buffers[key].copy_(intermediate_tensors[key],
+                # TypeError: copy_(): argument 'other' (position 1) must be Tensor, not NoneType
             })
 
         # if residual is not None:
@@ -1227,7 +1268,7 @@ class HymetaModel(nn.Module):
         # else:
         hidden_states = self.norm(hidden_states)
         # 最后一个 pipeline stage 需要去掉前面的 meta token
-        if input_meta_tokens:
+        if input_meta_tokens and not is_vllm_testing:
             hidden_states = hidden_states[self.num_meta_tokens:, :]
 
         return hidden_states
@@ -1309,8 +1350,12 @@ class HymetaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only, Supp
 
     def compute_logits(self, hidden_states: torch.Tensor,
                         sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        # print(f"compute_logits: hidden_states shape {hidden_states.shape}, "
+        #       f"hidden_states sample: {hidden_states[:5, :5]}, ")
         logits = self.logits_processor(self.lm_head, hidden_states.float(),
                                         sampling_metadata)
+        # print(f"logits shape {logits.shape}, "
+        #       f"logits sample: {logits[:5, :5]}")
         return logits
 
     def make_empty_intermediate_tensors(
@@ -1386,12 +1431,13 @@ class HymetaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only, Supp
                     return
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                weight_loader = weight_loader_with_alias(name)(weight_loader)
-                weight_loader(param,
-                              loaded_weight,
-                              weight_name,
-                              expert_id=expert_id,
-                              shard_id=shard_id)
+                # weight_loader = weight_loader_with_alias(name)(weight_loader)
+                weight_loader(param, loaded_weight, name, shard_id, expert_id)
+                # weight_loader(param,
+                #               loaded_weight,
+                #               weight_name,
+                #               expert_id=expert_id,
+                #               shard_id=shard_id)
                 loaded_params.add(name)
                 break
             else: # 如果没有找到对应的 expert 参数名，那么是 moe.gate 直接加载
@@ -1400,7 +1446,7 @@ class HymetaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only, Supp
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                weight_loader = weight_loader_with_alias(name)(weight_loader)
+                # weight_loader = weight_loader_with_alias(name)(weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
             return
@@ -1432,7 +1478,7 @@ class HymetaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only, Supp
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
-            weight_loader = weight_loader_with_alias(name)(weight_loader)
+            # weight_loader = weight_loader_with_alias(name)(weight_loader)
 
             if not self.CONCAT_FFN:
                 weight_loader(param, loaded_weight)
@@ -1478,7 +1524,7 @@ class HymetaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only, Supp
                     return
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader = weight_loader_with_alias(name)(weight_loader)
+                # weight_loader = weight_loader_with_alias(name)(weight_loader)
                 weight_loader(param, loaded_weight, shard_id)
                 loaded_params.add(name)
                 break
@@ -1487,7 +1533,7 @@ class HymetaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only, Supp
                     return
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader = weight_loader_with_alias(name)(weight_loader)
+                # weight_loader = weight_loader_with_alias(name)(weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
             return
@@ -1504,14 +1550,14 @@ class HymetaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only, Supp
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
-            weight_loader = weight_loader_with_alias(name)(weight_loader)
+            # weight_loader = weight_loader_with_alias(name)(weight_loader)
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
             return
 
-        warnings.warn(
-            f"The params of the model is: {list(params_dict.keys())}"
-        )
+        # warnings.warn(
+        #     f"The params of the model is: {list(params_dict.keys())}"
+        # )
         for name, loaded_weight in weights:
             weight_at_layer = which_layer(name)
             if weight_at_layer and weight_at_layer >= self.config.num_hidden_layers:

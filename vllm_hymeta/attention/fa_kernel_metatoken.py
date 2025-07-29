@@ -1,4 +1,5 @@
 from typing import Optional, Tuple
+import warnings
 
 import torch
 import torch.nn.functional as F
@@ -166,8 +167,8 @@ class FlashAttentionWithMetaToken(torch.autograd.Function):
             softcap=softcap,
         )
 
-        out1, lse1 = out1[0], out1[1]
-        # print(" Shape of out1: ", out1.shape, " lse1: ", lse1.shape)
+        out1, lse1 = out1[0], out1[1] # [batch_size=decode_one_nums, seq_len=1, num_heads, head_dim], [batch_size=decode_one_nums, num_heads, seq_len=1]
+        # warnings.warn(f"Shape of out1: {out1.shape}, lse1: {lse1.shape}, q1: {q1.shape}, k2: {k2.shape}, v2: {v2.shape}")
         q = torch.cat((q1, q2), dim=0) if q2 is not None else q1
         q = q.to(torch.bfloat16)
         out2 = _flash_attn_forward(
@@ -183,10 +184,11 @@ class FlashAttentionWithMetaToken(torch.autograd.Function):
             return_softmax=return_attn_probs,
             softcap=softcap,
         )
-        out2, lse2 = out2[0], out2[5]
+        out2, lse2 = out2[0], out2[5] # [seq_len=1, batch_size=decode_one_nums, num_heads, head_dim], [seq_len=1, num_heads, batch_size=decode_one_nums]
+        out2 = out2.transpose(0, 1) # [batch_size=decode_one_nums, seq_len=1, num_heads, head_dim]
+        lse2 = lse2.transpose(0, 2) # [batch_size=decode_one_nums, num_heads, seq_len=1]
         out, lse = _update_out_and_lse(out1, lse1, out2[:,:Lq], lse2[:,:,:Lq])
-
-        out = torch.cat((out, out2[:, Lq:]), dim=1) if q2 is not None else out
+        out = torch.cat((out2[:, Lq:], out), dim=1) if q2 is not None else out
         return out
 
 
@@ -268,7 +270,8 @@ class FlashAttentionVarlenWithMetaToken(torch.autograd.Function):
         out, lse = _update_out_and_lse(out1, lse1, out2[:,:Lq], lse2[:,:,:Lq])
         # print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++" \
         #      f"out shape: {out.shape}, lse shape: {lse.shape}, out2 shape: {out2.shape}, lse2 shape: {lse2.shape}")
-        out = torch.cat((out, out2[:, Lq:]), dim=1) if q2 is not None else out
+        # 注意这里要把 meta token 即 out2[:, Lq:] 输出放前面
+        out = torch.cat((out2[:, Lq:], out), dim=1) if q2 is not None else out
         # print(f"----------------------------------------------------after concat out shape: {out.shape}, q2 shape: {q2.shape if q2 is not None else None}")
         return out
 
