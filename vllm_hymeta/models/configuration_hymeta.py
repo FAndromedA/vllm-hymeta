@@ -67,7 +67,7 @@ class HymetaConfig(PretrainedConfig):
         self.rope_theta = rope_theta
         self.attention_dropout = attention_dropout
         self.fuse_cross_entropy = fuse_cross_entropy
-        self.full_attn_layers = [3, 11, 19, 27]
+        self.full_attn_layers = [3, 10, 17, 24]
         # dense MLP 层的索引
         self.dense_mlp_layers = [0, 1, 2, 4, 6, 8, 10]
 

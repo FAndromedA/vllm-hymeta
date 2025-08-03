@@ -56,15 +56,23 @@ from vllm.model_executor.models.interfaces import HasInnerState, IsHybrid, Suppo
 from vllm.sequence import IntermediateTensors
 
 from fla.modules import ShortConvolution
-from fla.ops.gla import fused_chunk_gla# , chunk_gla, fused_recurrent_gla
+from fla.ops.gla import fused_chunk_gla, fused_recurrent_gla
 
 from .my_fused_recurrent_gla import my_fused_recurrent_gla
 from .hymeta_cache import HymetaCacheManager, HymetaCacheParams
 from .configuration_hymeta import HymetaConfig
 from .attention import MetaAttention
 
-import logging 
-logger = logging.getLogger(__name__)
+import os
+def log_tensor_to_file(tensor, layer_idx, tag, suffix="", directory="/root/docker_shared/vllm-hymeta/test_vllm/debug_logs", hidden_state_len=0):
+    """Log a tensor to a unique file for debugging."""
+    if (hidden_state_len != 8192) and (hidden_state_len != 8192 + 128):
+        return
+    os.makedirs(directory, exist_ok=True)
+    device_id = torch.cuda.current_device() if tensor.is_cuda else "cpu"
+    filename = f"{directory}/layer{layer_idx:03d}_{tag}_device{device_id}{suffix}.pt"
+    torch.save(tensor.detach().cpu(), filename)
+
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
@@ -82,7 +90,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     assert hidden_states.dim() == 3, \
         "hidden_states should be 3D tensor, but got {}".format(hidden_states.dim())
     num_tokens, num_heads, head_dim = hidden_states.shape
-    hidden_states = hidden_states[:, None, :, :].expand(num_tokens, n_rep, num_heads, head_dim)
+    hidden_states = hidden_states[:, :, None, :].expand(num_tokens, num_heads, n_rep, head_dim)
     return hidden_states.reshape(num_tokens, num_heads * n_rep, head_dim)
 
 
@@ -139,7 +147,7 @@ class HymetaRMSNormTP(CustomOp):
         shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
         param.data.copy_(loaded_weight[shard])
         return
-    
+
     def _forward(
         self,
         x: torch.Tensor,
@@ -308,7 +316,7 @@ class HymetaMoE(nn.Module):
             intermediate_size=self.intermediate_size * self.tp_size,
             params_dtype=self.params_dtype,
             reduce_results=True,
-            renormalize=True, # softmax topk 之后对权重归一化
+            renormalize=False, # softmax topk 之后对权重归一化
             quant_config=self.quant_config,
             tp_size=self.tp_size,
             activation="silu",
@@ -340,7 +348,7 @@ class HymetaMoE(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
-        hidden_states = hidden_states.view(-1, self.hidden_size)
+        hidden_states = hidden_states.reshape(-1, self.hidden_size)
         router_logits = self.gate(hidden_states)
         # print(f"HymetaMoE {self.layer_idx} forward, "
         #        f"hidden_states has nan: {torch.isnan(hidden_states).any()}, "
@@ -352,7 +360,7 @@ class HymetaMoE(nn.Module):
         #        )
         final_hidden_states = self.experts(
             hidden_states, router_logits.to(hidden_states.dtype))
-        final_hidden = final_hidden_states.view(num_tokens, hidden_size)
+        final_hidden = final_hidden_states.reshape(num_tokens, hidden_size)
         return final_hidden
     
 class HLinearAttention(nn.Module):
@@ -421,12 +429,6 @@ class HLinearAttention(nn.Module):
             prefix=f"{prefix}.qkv_proj",
         )
 
-        # if use_short_conv:
-        #     self.conv_size = conv_size
-        #     self.q_conv1d = ShortConvolution(self.key_dim, conv_size, activation='silu')
-        #     self.k_conv1d = ShortConvolution(self.num_key_value_heads * self.head_dim, conv_size, activation='silu')
-        #     self.v_conv1d = ShortConvolution(self.num_key_value_heads * self.head_dim, conv_size, activation='silu')
-
         self.q_feature_map = ACT2FN['relu']
 
     @staticmethod
@@ -458,7 +460,7 @@ class HLinearAttention(nn.Module):
                 k_slice = k_slice.unsqueeze(0)
                 v_slice = v_slice.unsqueeze(0)
                 g_slice = g_slice.unsqueeze(0)
-            o, recurrent_state = fused_chunk_gla(
+            o, recurrent_state = fused_recurrent_gla(
                 q_slice, k_slice, v_slice, g_slice, initial_state=None, output_final_state=use_cache)
             
             meta_cache.copy_(recurrent_state.squeeze(0)) # [num_heads, head_dim, head_dim]
@@ -483,7 +485,9 @@ class HLinearAttention(nn.Module):
             g_slice = g[_start:_end].transpose(0, 1).contiguous()
             # 为什么 prefill 请求还会有 Cache, 这是因为 backend 一个 prefill 可能被拆分成多个请求
             # https://zhuanlan.zhihu.com/p/1916181593229334390
-            initial_state = kv_cache[slot_id, ...] 
+            initial_state = kv_cache[slot_id, ...].unsqueeze(0) # [1, num_heads, head_dim, head_dim]
+            if initial_state.isnan().any(): # 未初始化的 kv_cache 可能有 nan
+                initial_state = None
             
             # context_len_tensor[idx] 为 0 说明是第一次处理这个 slot_id 的 prefill 请求
             # https://github.com/vllm-project/vllm/blob/main/vllm/attention/backends/flash_attn.py
@@ -495,6 +499,8 @@ class HLinearAttention(nn.Module):
             # |-------------------- seq_len ---------------------|
             #                                   |-- query_len ---|
             if attn_metadata.context_lens_tensor[_prefill_idx] == 0 and not is_vllm_testing:
+                assert meta_cache.isnan().any() == False, \
+                    f"fused_chunk_gla layer:{self.layer_idx}, meta_cache has nan: {meta_cache.isnan().any()}, \n" 
                 initial_state = meta_cache.unsqueeze(0) # [1, num_heads, head_dim, head_dim]
 
             should_pad_dim = q_slice.dim() == 3
@@ -503,17 +509,38 @@ class HLinearAttention(nn.Module):
                 k_slice = k_slice.unsqueeze(0)
                 v_slice = v_slice.unsqueeze(0)
                 g_slice = g_slice.unsqueeze(0)
-            o, recurrent_state = fused_chunk_gla(
+            o, recurrent_state = fused_recurrent_gla(
                 q_slice, k_slice, v_slice, g_slice, initial_state=initial_state, output_final_state=True)
-
+            # num_prefills = getattr(attn_metadata, "num_prefills", 0)
+            # warnings.warn(
+            #     f"fused_chunk_gla layer:{self.layer_idx}, num_prefills: {num_prefills}, start-end: {_start}-{_end}\n"
+            #     f"len(state_indices_tensor): {len(state_indices_tensor)}, len(attn_metadata.query_start_loc): {len(attn_metadata.query_start_loc)} \n"
+            #     f"output shape: {o.shape}, recurrent_state shape: {recurrent_state.shape}, state_indices_tensor shape: {state_indices_tensor.shape}\n"
+            #     f"has_meta_cache: {has_meta_cache}, initial_state shape: {initial_state.shape}, \n"
+            #     f"q_slice shape: {q_slice.shape}, q shape: {q.shape}, \n"
+            #     f"v_slice shape: {v_slice.shape}, v shape: {v.shape}, \n"
+            #     f"g_slice shape: {g_slice.shape}, g shape: {g.shape}, \n"
+            #     f"initial_state sample: {initial_state[:, 0, :3, :3]}, \n"
+            #     f"recurrent_state sample: {recurrent_state[:, 0, :3, :3]}, \n"
+            # )
             if not is_vllm_testing:
+                # 因为我自定义的 cache 是 kv, 但是 gla 的 recurrent 是 vk，但是 gla 读的时候又本来就反过来读的，所以传的时候不用 transpose
                 kv_cache[slot_id].copy_(recurrent_state.squeeze(0)) # [1, num_heads, head_dim, head_dim]
             hidden.append(rearrange(o.squeeze(0), 'h n d -> n (h d)').contiguous()) # [num_tokens, h*d]
+            # assert o.isnan().any() == False, \
+            #     f"fused_chunk_gla layer:{self.layer_idx}, o has nan: {o.isnan().any()}, \n" \
+            #     f"o shape: {o.shape}, o sample: {o[0, 0, :5]}, \n" \
+            #     f"recurrent_state shape: {recurrent_state.shape}, recurrent_state sample: {recurrent_state[0, 0, :3, :3]}, \n" \
+            #     f"recurrent_state has nan: {recurrent_state.isnan().any()}, min/max {recurrent_state.min()}/{recurrent_state.max()} \n" \
+            #     f"q_slice shape: {q_slice.shape}, q_slice sample: {q_slice[0, 0, :5]}, \n" \
+            #     f"k_slice shape: {k_slice.shape}, k_slice sample: {k_slice[0, 0, :5]}, \n" \
+            #     f"v_slice shape: {v_slice.shape}, v_slice sample: {v_slice[0, 0, :5]}, \n" \
+            #     f"initial_state shape: {initial_state.shape}, initial_state sample: {initial_state[0, 0, :3, :3]}, \n" 
 
         if attn_metadata.num_decode_tokens > 0: # 有需要解码的 tokens
             hidden.append(
                 self._decode(q, k, v, g, kv_cache, has_meta_cache,
-                             state_indices_tensor, attn_metadata)
+                             state_indices_tensor, attn_metadata, is_vllm_testing)
             )
         if not hidden:
             return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
@@ -525,12 +552,29 @@ class HLinearAttention(nn.Module):
         # 因为解码的请求的长度都是 1， 这里的 num_tokens 维度等效于 batch 维度(同时处理多个解码请求)
         meta_tokens_offset = self.num_meta_tokens if (not has_meta_cache and not is_vllm_testing) else 0
         _start = attn_metadata.num_prefill_tokens + meta_tokens_offset
-        q = q[_start:].unsqueeze(2).contiguous() # [num_tokens, num_heads, 1, head_dim]
+        q = q[_start:].unsqueeze(2).contiguous() # [batch=num_tokens, num_heads, seqlen=1, head_dim]
         k = k[_start:].unsqueeze(2).contiguous()
         v = v[_start:].unsqueeze(2).contiguous()
         g = g[_start:].unsqueeze(2).contiguous()
         slot_ids = state_indices_tensor[getattr(attn_metadata, "num_prefills", 0):]
+        
+        # Just for testing
+        # kv_cache[slot_ids[0]] = torch.zeros_like(kv_cache[slot_ids[0]], device=kv_cache.device, dtype=kv_cache.dtype)
+        # if not is_vllm_testing:
+        #     o_fla, recurrent_state = fused_recurrent_gla(q[:1,...], k[:1,...], v[:1,...], g[:1,...], 
+        #                                 initial_state=kv_cache[slot_ids[0]].unsqueeze(0), output_final_state=True)
+        #     o_fla = o_fla.reshape(1, -1) # [1, h*d]
+        #     # just fo debugging my_gla
         o = my_fused_recurrent_gla(q, k, v, g, kv_caches=kv_cache, slot_idx=slot_ids) # [num_tokens, h*d]
+        
+        # assert torch.allclose(o[0], o_fla, atol=1e-1), \
+        #     f"fla and my_fla output not close, layer: {self.layer_idx}, o shape: {o.shape}, o sample: {o[0, :50]}, \n" \
+        #     f"fla output shape: {o_fla.shape}, fla output sample: {o_fla[0, :50]}, \n" \
+        #     f"torch.allclose(o, o_fla, atol=1e-1): {torch.allclose(o, o_fla, atol=1e-1)}, \n" \
+        #     f"kv_cache[slot_ids[0]] shape: {kv_cache[slot_ids[0]].shape}, \n" \
+        #     f"kv_cache[slot_ids[0]] sample: {kv_cache[slot_ids[0]][0, :5, :5]}, \n" \
+        #     f"recurrent_state shape: {recurrent_state.shape}, \n" \
+        #     f"recurrent_state sample: {recurrent_state[0, 0, :5, :5]}, \n" 
         return o
 
     def forward(
@@ -556,6 +600,10 @@ class HLinearAttention(nn.Module):
         k = k.reshape(k.shape[0], -1, self.head_dim) # [num_tokens, num_heads, head_dim]
         v = v.reshape(v.shape[0], -1, self.head_dim) # [num_tokens, num_heads, head_dim]
 
+        # log_tensor_to_file(q[:, :, :200], self.layer_idx, "linear_attn_q", hidden_state_len=q.shape[0])
+        # log_tensor_to_file(k[:, :, :200], self.layer_idx, "linear_attn_k", hidden_state_len=k.shape[0])
+        # log_tensor_to_file(v[:, :, :200], self.layer_idx, "linear_attn_v", hidden_state_len=v.shape[0])
+
         # 这里之后可以优化不 repeat_kv 
         k = repeat_kv(k, self.tp_heads // self.tp_kv_heads) # [num_tokens, num_heads, head_dim]
         v = repeat_kv(v, self.tp_heads // self.tp_kv_heads)
@@ -565,7 +613,7 @@ class HLinearAttention(nn.Module):
         k = k.float()
 
         # the lower bound for the first layer is zero
-        if lower_bound is None or self.layer_idx == 0:
+        if lower_bound is None or self.layer_idx % 7 == 0:
             k = k.sigmoid()
             k = torch.clamp(k, max=self.clamp_max)
             g = (1 - k).log()
@@ -580,6 +628,11 @@ class HLinearAttention(nn.Module):
             k, g = 1 - g, g.log()
         k = k.to(v)
 
+        # log_tensor_to_file(q[:, :, :], self.layer_idx, "linear_attn_q_after", hidden_state_len=q.shape[0])
+        # log_tensor_to_file(k[:, :, :], self.layer_idx, "linear_attn_k_after", hidden_state_len=k.shape[0])
+        # log_tensor_to_file(v[:, :, :], self.layer_idx, "linear_attn_v_after", hidden_state_len=v.shape[0])
+        # log_tensor_to_file(g[:, :, :], self.layer_idx, "linear_attn_g_after", hidden_state_len=g.shape[0])
+
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
         
@@ -590,7 +643,8 @@ class HLinearAttention(nn.Module):
         decode_only = getattr(attn_metadata, "num_prefills", 0) == 0
 
         # outputs = []
-        if not decode_only:
+        if not (decode_only) or (not has_meta_cache): 
+            # 这里 or not has_meta_cache 是因为 vllm 测试的时候出现 decode only 但是前面没有 prefill 过的请求。
             outputs = self._prefill_and_mix_infer(q, k, v, g, 
                                                 kv_cache, 
                                                 has_meta_cache,
@@ -676,13 +730,7 @@ class FlashAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
-        # self.o_proj = RowParallelLinear(
-        #     self.total_num_heads * self.head_dim,
-        #     hidden_size,
-        #     bias=False,
-        #     quant_config=quant_config,
-        #     prefix=f"{prefix}.o_proj",
-        # )
+
         self.attn = MetaAttention(
             num_heads=self.num_heads,
             head_size=self.head_dim,
@@ -706,7 +754,16 @@ class FlashAttention(nn.Module):
         attn_metadata = forward_context.attn_metadata
         qkv, _ = self.qkv_proj(hidden_states) # [num_tokens, hidden_size]
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        
+        # log_tensor_to_file(q[:, :200], self.layer_idx, "flash_attn_q", hidden_state_len=q.shape[0])
+        # log_tensor_to_file(k[:, :200], self.layer_idx, "flash_attn_k", hidden_state_len=k.shape[0])
+        # log_tensor_to_file(v[:, :200], self.layer_idx, "flash_attn_v", hidden_state_len=v.shape[0])
+
         q, k = attn_metadata.rotary_emb(positions, q, k)
+
+        # log_tensor_to_file(q[:, :], self.layer_idx, "flash_attn_q_after_rotary", hidden_state_len=q.shape[0])
+        # log_tensor_to_file(k[:, :], self.layer_idx, "flash_attn_k_after_rotary", hidden_state_len=k.shape[0])
+        
         # warnings.warn(f"FlashAttention{self.layer_idx} before forward, "
         #       f"q shape: {q.shape}, k shape: {k.shape}, v shape: {v.shape}, "
         #       f"q has nan: {torch.isnan(q).any()}, min/max: {q.min()}/{q.max()}, "
@@ -717,22 +774,23 @@ class FlashAttention(nn.Module):
         q1, k1, v1 = q, k, v
         q2, k2, v2 = None, None, None
         if (has_meta_cache == False) and (self.num_meta_tokens > 0) and (is_vllm_testing == False):
-            q1 = q1[self.num_meta_tokens:] # view is done in attn
+            q1 = q1[self.num_meta_tokens:] # reshape is done in attn
             k1 = k1[self.num_meta_tokens:]
             v1 = v1[self.num_meta_tokens:]
             # 只有第一次处理 meta_tokens 时才会需要 q2 计算
-            q2 = q[:self.num_meta_tokens].view(self.num_meta_tokens, self.num_heads, self.head_dim)
+            q2 = q[:self.num_meta_tokens].reshape(self.num_meta_tokens, self.num_heads, self.head_dim)
             
             kv_caches.meta_fattn_cache[0].copy_(
-                k[:self.num_meta_tokens].view(self.num_meta_tokens, self.num_kv_heads, self.head_dim)
+                k[:self.num_meta_tokens].reshape(self.num_meta_tokens, self.num_kv_heads, self.head_dim)
             )
             kv_caches.meta_fattn_cache[1].copy_(
-                v[:self.num_meta_tokens].view(self.num_meta_tokens, self.num_kv_heads, self.head_dim)
+                v[:self.num_meta_tokens].reshape(self.num_meta_tokens, self.num_kv_heads, self.head_dim)
             )
         
         if self.num_meta_tokens > 0:
             k2 = kv_caches.meta_fattn_cache[0]
             v2 = kv_caches.meta_fattn_cache[1]
+
 
         attn_output = self.attn(q1, k1, v1, query2=q2, key2=k2, value2=v2)
         # warnings.warn(f"FlashAttention{self.layer_idx} after forward, "
@@ -741,7 +799,19 @@ class FlashAttention(nn.Module):
         #       f"attn_output min/max: {attn_output.min()}/{attn_output.max()}, "
         #       f"attn_output all zeros: {torch.all(attn_output == 0)}, "
         # )
-        
+        if torch.isnan(attn_output).any():
+            print(f"Warning: FlashAttention{self.layer_idx} has nan in attn_output, "
+                  f"attn_output shape: {attn_output.shape}, "
+                  f"attn_output sample: {attn_output}, \n"
+                  f"q1 shape: {q1.shape}, k1 shape: {k1.shape}, v1 shape: {v1.shape}, \n"
+                  f"q2 shape: {q2.shape if q2 is not None else 'None'}, "
+                  f"k2 shape: {k2.shape if k2 is not None else 'None'}, "
+                  f"v2 shape: {v2.shape if v2 is not None else 'None'}\n"
+                  f"q1 sample: {q1},\n k1 sample: {k1},\n v1 sample: {v1}, \n"
+                  f"q2 sample: {q2 if q2 is not None else 'None'}, \n"
+                  f"k2 sample: {k2 if k2 is not None else 'None'}, \n"
+                  f"v2 sample: {v2 if v2 is not None else 'None'}")
+            exit(0)
         return attn_output
 
 class IntraHybridAttention(nn.Module):
@@ -802,6 +872,9 @@ class IntraHybridAttention(nn.Module):
         is_vllm_testing: bool = False,
         **kwargs,
     ) -> torch.FloatTensor:
+        # log_tensor_to_file(self.norm1.weight, self.layer_idx, "norm1_weight", hidden_state_len=8192)
+        # log_tensor_to_file(self.norm2.weight, self.layer_idx, "norm2_weight", hidden_state_len=8192)
+        # exit(0)
         out_attn = self.vanilla_attn(
             hidden_states=hidden_states,
             positions=position_ids,
@@ -819,6 +892,9 @@ class IntraHybridAttention(nn.Module):
             is_vllm_testing=is_vllm_testing,
             **kwargs
         )
+        # log_tensor_to_file(out_attn[:, :], self.layer_idx, "out_attn", hidden_state_len=out_attn.shape[0])
+        # log_tensor_to_file(out_linear[:, :], self.layer_idx, "out_linear", hidden_state_len=out_linear.shape[0])
+
         # warnings.warn(f"IntraHybridAttention{self.layer_idx}, out_attn: {out_attn.shape}, out_linear: {out_linear.shape}, hidden_states: {hidden_states.shape}\n"
         #         f"out_attn has nan: {torch.isnan(out_attn).any()}, "
         #         f"out_linear has nan: {torch.isnan(out_linear).any()}, "
@@ -826,13 +902,27 @@ class IntraHybridAttention(nn.Module):
         #         f"out_attn sample: {out_attn[:5, :5]}, "
         #         f"out_linear sample: {out_linear[:5, :5]}, "
         #         f"hidden_states sample: {hidden_states[:5, :5]}, "
-        #         f"hidden_states max/min:", hidden_states.max(), hidden_states.min()
+        #         f"hidden_states max/min: {hidden_states.max()}, {hidden_states.min()}"
         #        )
 
-        hidden_states = (self.norm1(out_attn) + self.norm2(out_linear)) / 2
+        out_attn_norm = self.norm1(out_attn)
+        out_linear_norm = self.norm2(out_linear)
+        # log_tensor_to_file(out_attn_norm[:, :], self.layer_idx, "out_attn_norm", hidden_state_len=out_attn_norm.shape[0])
+        # log_tensor_to_file(out_linear_norm[:, :], self.layer_idx, "out_linear_norm", hidden_state_len=out_linear_norm.shape[0])
+
+        hidden_states = (out_attn_norm + out_linear_norm) / 2
+
+
+        # log_tensor_to_file(hidden_states[:, :200], self.layer_idx, "out_swa_lin_avg", hidden_state_len=hidden_states.shape[0])
+
         hidden_states = hidden_states.to(torch.bfloat16)
         hidden_states = self.out_proj(hidden_states)
-
+        
+        assert torch.isnan(hidden_states).any() == False, \
+            f"IntraHybridAttention {self.layer_idx} forward has nan in hidden_states, " \
+            f"out_attn: {out_attn.shape}, out_linear: {out_linear.shape}, " \
+            f"out_attn has nan: {torch.isnan(out_attn).any()}, " \
+            f"out_linear has nan: {torch.isnan(out_linear).any()}, "
         return hidden_states
 
 class HybridBlock(nn.Module):
@@ -907,7 +997,7 @@ class HybridBlock(nn.Module):
                 # self.coefficient.weight.weight_loader = (
                 #     self.shared_moe_coefficient_loader
                 # )
-                self.shared_moe_mode = getattr(config, "shared_moe_mode", "softmax")
+                # self.shared_moe_mode = getattr(config, "shared_moe_mode", "softmax")
 
     def forward(
         self,
@@ -922,7 +1012,11 @@ class HybridBlock(nn.Module):
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor]:
 
         residual = hidden_states
+        # log_tensor_to_file(hidden_states[:, :], self.layer_idx, "input", hidden_state_len=hidden_states.shape[0])
+
         hidden_states = self.attn_norm(hidden_states)
+        # log_tensor_to_file(hidden_states[:, :], self.layer_idx, "after_attn_norm", hidden_state_len=hidden_states.shape[0])
+
         hidden_states = self.attn(
             hidden_states=hidden_states,
             attn_metadata=attn_metadata,
@@ -933,21 +1027,24 @@ class HybridBlock(nn.Module):
             is_vllm_testing=is_vllm_testing,
             **kwargs
         )
+        # log_tensor_to_file(hidden_states[:, :], self.layer_idx, "after_attn", hidden_state_len=hidden_states.shape[0])
+
         norm_hidden_states, residual = self.mlp_norm(hidden_states, residual)
-        # print(f"HybridBlock {self.layer_idx} forward before moe, "
-        #       f"hidden_states: {hidden_states.shape}, has nan: {torch.isnan(hidden_states).any()}, "
-        #       f"hidden_states sample: {hidden_states[:5, :5]}, min/max: {hidden_states.min()}/{hidden_states.max()}, ")
+        # log_tensor_to_file(norm_hidden_states[:, :], self.layer_idx, "after_mlp_norm", hidden_state_len=hidden_states.shape[0])
+
+        assert torch.isnan(norm_hidden_states).any() == False, \
+            f"HybridBlock {self.layer_idx} forward after attn has nan in norm_hidden_states, "
         if self.expert_num == 1:
             hidden_states = self.mlp(norm_hidden_states)
-            # print(f"HybridBlock {self.layer_idx} forward after moe, "
-            #   f"hidden_states: {hidden_states.shape}, has nan: {torch.isnan(hidden_states).any()}, "
-            #   f"hidden_states sample: {hidden_states[:5, :5]}")
+            # log_tensor_to_file(hidden_states[:, :], self.layer_idx, "after_mlp", hidden_state_len=hidden_states.shape[0])
         else:
             moe_hidden_states = self.block_sparse_moe(copy.deepcopy(norm_hidden_states))
+            # log_tensor_to_file(moe_hidden_states[:, :], self.layer_idx, "after_block_sparse_moe", hidden_state_len=hidden_states.shape[0])
             if self.shared_moe:
                 before_moe_dtype = norm_hidden_states.dtype
                 # moe_hidden_fp32 = moe_hidden_states.to(torch.float32)
                 shared_mlp_out = self.shared_mlp(norm_hidden_states).to(before_moe_dtype)
+                # log_tensor_to_file(shared_mlp_out[:, :], self.layer_idx, "after_shared_mlp", hidden_state_len=hidden_states.shape[0])
 
                 # no coef
                 # hidden_states = shared_mlp_out + moe_hidden_fp32
@@ -962,15 +1059,12 @@ class HybridBlock(nn.Module):
                 # hidden_states = hidden_states.to(before_moe_dtype)
             else:
                 hidden_states = moe_hidden_states
-            # print(f"HybridBlock {self.layer_idx} forward after moe, "
-            #       f"hidden_states: {hidden_states.shape}, has nan: {torch.isnan(hidden_states).any()}, "
-            #       f"hidden_states sample: {hidden_states[:5, :5]}, "
-            #       f"moe_hidden_states: {moe_hidden_states.shape}, has nan: {torch.isnan(moe_hidden_states).any()},"
-            #       f"moe_hidden_states sample: {moe_hidden_states[:5, :5]}, all zeros: {torch.all(moe_hidden_states == 0)}, "
-            #       f"shared_mlp_out: {shared_mlp_out.shape}, has nan: {torch.isnan(shared_mlp_out).any()},"
-            #       f"shared_mlp_out sample: {shared_mlp_out[:5, :5]}")
+           
         hidden_states = residual + hidden_states
+        # log_tensor_to_file(hidden_states[:, :], self.layer_idx, "final_output", hidden_state_len=hidden_states.shape[0])
 
+        assert torch.isnan(hidden_states).any() == False, \
+            f"HybridBlock {self.layer_idx} forward after mlp or moe has nan in hidden_states, " 
         return hidden_states, None
     
     # @staticmethod
@@ -1056,7 +1150,7 @@ class HymetaModel(nn.Module):
         del _dummy
 
         self.has_meta_cache = 0 # Become True after the first forward pass through all layers.
-        self.meta_cache_threshold = 1 if get_pp_group().is_first_rank else 37 # if enforce_eager else 37
+        self.meta_cache_threshold = 2 # if enforce_eager else 37, 第一层也是 2 是因为需要给后面的层传
         # but when the vllm is launching, it will run several times ignoring the order of pipelines
         # so we must set it True until it has run beyond a threshold, here we let it be 2 if --enforce-eager
         # else we let it be 1(128k) + 256/8(256,248,...,8) + 3(4, 2, 1) + 1(True request) = 1 + 32 + 3 + 1 = 37
@@ -1080,7 +1174,7 @@ class HymetaModel(nn.Module):
             head_size=head_dim,
             rotary_dim=config.rotary_dim if hasattr(config, "rotary_dim") else head_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
+            base=int(rope_theta),
             is_neox_style=True,
             cache_dtype=torch.bfloat16,
             # prefix=f"{prefix}.rotary_emb",
@@ -1201,7 +1295,6 @@ class HymetaModel(nn.Module):
             # 所以 hidden_states 并不是来源于上一层 pipeline，因此没有上一层的 meta tokens
             assert get_pp_group().is_first_rank is False
             is_vllm_testing = True
-            
 
         attn_metadata.rotary_emb = self.rotary_emb
 
@@ -1214,15 +1307,18 @@ class HymetaModel(nn.Module):
         if new_positions.shape[0] < hidden_states.shape[0]:
             # 因为 meta token 的插入导致 positions 的长度变了
             # 不一定是在这个 pipeline stage 添加的，所以这样判断
+            meta_positions = torch.arange(
+                self.num_meta_tokens, dtype=positions.dtype, device=positions.device
+            )
             new_positions = torch.cat(
-                (torch.zeros(self.num_meta_tokens, dtype=positions.dtype, device=positions.device), new_positions), dim=0
+                (meta_positions, new_positions), dim=0
             )
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             _caches = hymeta_cache_params.at_layer_idx(i)
 
-            lower_bound = lower_bounds[i] if self.use_lower_bound else None
+            lower_bound = lower_bounds[i % 7] if self.use_lower_bound else None
             
             # JUST FOR DEBUGGING
             # warnings.warn(
@@ -1263,9 +1359,6 @@ class HymetaModel(nn.Module):
                 # TypeError: copy_(): argument 'other' (position 1) must be Tensor, not NoneType
             })
 
-        # if residual is not None:
-        #     hidden_states, _ = self.norm(hidden_states, residual)
-        # else:
         hidden_states = self.norm(hidden_states)
         # 最后一个 pipeline stage 需要去掉前面的 meta token
         if input_meta_tokens and not is_vllm_testing:
@@ -1354,8 +1447,10 @@ class HymetaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only, Supp
         #       f"hidden_states sample: {hidden_states[:5, :5]}, ")
         logits = self.logits_processor(self.lm_head, hidden_states.float(),
                                         sampling_metadata)
-        # print(f"logits shape {logits.shape}, "
-        #       f"logits sample: {logits[:5, :5]}")
+        # if logits is not None:
+        #     print(f"logits shape {logits.shape}, has nan: {torch.isnan(logits).any()}, "
+        #             f"logits min/max: {logits.min()}/{logits.max()}, "
+        #             f"logits sample: {logits[:5, :5]}")
         return logits
 
     def make_empty_intermediate_tensors(
@@ -1387,8 +1482,7 @@ class HymetaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only, Supp
             return None
 
         def is_linear_attn_layer(name: str) -> bool:
-            if "linear_attn" in name:
-                return True
+            return "linear_attn" in name
 
         def is_moe_weight(name: str) -> bool:
             # no bias for moe's experts
@@ -1426,9 +1520,9 @@ class HymetaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only, Supp
                     continue
                 if weight_name not in name:
                     continue
-                name = name.replace(weight_name, param_name)
                 if is_pp_missing_parameter(name, self):
                     return
+                name = name.replace(weight_name, param_name)
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 # weight_loader = weight_loader_with_alias(name)(weight_loader)
@@ -1439,6 +1533,9 @@ class HymetaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only, Supp
                 #               expert_id=expert_id,
                 #               shard_id=shard_id)
                 loaded_params.add(name)
+                # print(f"load_sparse_moe_weight: {name}, weight_name: {weight_name}, param_name: {param_name}, "
+                #       f"loaded_weight shape: {loaded_weight.shape}, "
+                #       f"expert_id: {expert_id}, shard_id: {shard_id}")
                 break
             else: # 如果没有找到对应的 expert 参数名，那么是 moe.gate 直接加载
                 if is_pp_missing_parameter(name, self):
@@ -1449,6 +1546,7 @@ class HymetaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only, Supp
                 # weight_loader = weight_loader_with_alias(name)(weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
+                # print(f"load_sparse_moe_weight: {name}, loaded_weight shape: {loaded_weight.shape}")
             return
         
         def is_shared_mlp_weight(name: str) -> bool:
@@ -1490,24 +1588,12 @@ class HymetaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only, Supp
                 else:
                     raise AssertionError(
                         "MLP weight not in [gate_up_proj, down_proj]")
+            # print(f"load_mlp_weight: {name}, loaded_weight shape: {loaded_weight.shape}")
             loaded_params.add(name)
             return
         
         def is_flash_attn_weight(name: str) -> bool:
             return "vanilla_attn" in name
-
-        # def load_linear_attn_weight(name: str, loaded_weight: torch.Tensor,
-        #                             self) -> None:
-        #     if is_pp_missing_parameter(name, self):
-        #         return
-        #     param = params_dict[name]
-
-        #     weight_loader = getattr(param, "weight_loader",
-        #                             HLinearAttention.weight_direct_load)
-        #     weight_loader = weight_loader_with_alias(name)(weight_loader)
-        #     weight_loader(param, loaded_weight)
-        #     loaded_params.add(name)
-        #     return
 
         def load_attn_weight(name: str, loaded_weight: torch.Tensor,
                                   self) -> None:
@@ -1519,14 +1605,15 @@ class HymetaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only, Supp
             for (param_name, weight_name, shard_id) in flash_mha_params_mapping:
                 if weight_name not in name:
                     continue
-                name = name.replace(weight_name, param_name)
                 if is_pp_missing_parameter(name, self):
                     return
+                name = name.replace(weight_name, param_name)
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 # weight_loader = weight_loader_with_alias(name)(weight_loader)
                 weight_loader(param, loaded_weight, shard_id)
                 loaded_params.add(name)
+                # print(f"load_attn_weight: {name}, shard_id: {shard_id}, weight_name: {weight_name}, param_name: {param_name}, loaded_weight shape: {loaded_weight.shape}")
                 break
             else:
                 if is_pp_missing_parameter(name, self):
@@ -1536,6 +1623,7 @@ class HymetaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only, Supp
                 # weight_loader = weight_loader_with_alias(name)(weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
+                # print(f"load_attn_weight: {name}")
             return
         
         def is_layer_norm_weight(name: str) -> bool:
@@ -1553,6 +1641,7 @@ class HymetaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only, Supp
             # weight_loader = weight_loader_with_alias(name)(weight_loader)
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
+            # print(f"load_basic_weight: {name}, loaded_weight shape: {loaded_weight.shape}")
             return
 
         # warnings.warn(
@@ -1560,21 +1649,18 @@ class HymetaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only, Supp
         # )
         for name, loaded_weight in weights:
             weight_at_layer = which_layer(name)
-            if weight_at_layer and weight_at_layer >= self.config.num_hidden_layers:
+            if weight_at_layer is not None and weight_at_layer >= self.config.num_hidden_layers:
                 continue
             
             if "mode." in name: # the checkpoint store model.norm wrongly as "mode.norm"
                 name = name.replace("mode.", "model.")
-            # if is_layer_norm_weight(name):
-            #     load_basic_weight(name, loaded_weight, self)
-            #     continue
+            if is_layer_norm_weight(name):
+                load_basic_weight(name, loaded_weight, self)
+                continue
             if is_flash_attn_weight(name) or is_linear_attn_layer(name):
                 load_attn_weight(name, loaded_weight, self)
                 continue
 
-            # if is_linear_attn_layer(weight_at_layer):
-            #     load_linear_attn_weight(name, loaded_weight, self)
-            #     continue
             if is_moe_weight(name):
                 load_sparse_moe_weight(name, loaded_weight, self)
                 continue
@@ -1586,5 +1672,6 @@ class HymetaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only, Supp
                 continue
 
             load_basic_weight(name, loaded_weight, self)
+        # exit(0) # for debug
         return loaded_params
 
