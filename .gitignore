@@ -3,3 +3,6 @@
 **/build/
 **/vllm_hymeta.egg-info/
 **/*nohup.log*/
+**/debug_logs/
+**/debug_txt_logs/*
+*.pt

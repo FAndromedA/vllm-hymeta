@@ -460,7 +460,7 @@ class HLinearAttention(nn.Module):
                 k_slice = k_slice.unsqueeze(0)
                 v_slice = v_slice.unsqueeze(0)
                 g_slice = g_slice.unsqueeze(0)
-            o, recurrent_state = fused_recurrent_gla(
+            o, recurrent_state = fused_chunk_gla(
                 q_slice, k_slice, v_slice, g_slice, initial_state=None, output_final_state=use_cache)
             
             meta_cache.copy_(recurrent_state.squeeze(0)) # [num_heads, head_dim, head_dim]
@@ -509,7 +509,7 @@ class HLinearAttention(nn.Module):
                 k_slice = k_slice.unsqueeze(0)
                 v_slice = v_slice.unsqueeze(0)
                 g_slice = g_slice.unsqueeze(0)
-            o, recurrent_state = fused_recurrent_gla(
+            o, recurrent_state = fused_chunk_gla(
                 q_slice, k_slice, v_slice, g_slice, initial_state=initial_state, output_final_state=True)
             # num_prefills = getattr(attn_metadata, "num_prefills", 0)
             # warnings.warn(
