@@ -180,7 +180,7 @@ class FlashAttentionWithMetaToken(torch.autograd.Function):
             causal=False,
             window_size=(-1, -1),
             alibi_slopes=alibi_slopes,
-            attn_mask=attn_mask,
+            # attn_mask=attn_mask,
             return_softmax=return_attn_probs,
             softcap=softcap,
         )
@@ -263,7 +263,7 @@ class FlashAttentionVarlenWithMetaToken(torch.autograd.Function):
             causal=False, # ? 官方实现不一样 https://github.com/NVlabs/hymba/blob/main/barebones_hymba/barebones_hymba_block.py
             window_size=(-1, -1),
             alibi_slopes=alibi_slopes,
-            attn_mask=attn_mask,
+            # attn_mask=attn_mask,
             return_softmax=return_attn_probs,
             softcap=softcap,
         )

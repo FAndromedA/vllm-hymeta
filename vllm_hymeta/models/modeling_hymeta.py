@@ -64,7 +64,7 @@ from .configuration_hymeta import HymetaConfig
 from .attention import MetaAttention
 
 import os
-def log_tensor_to_file(tensor, layer_idx, tag, suffix="", directory="/root/docker_shared/vllm-hymeta/test_vllm/debug_logs", hidden_state_len=0):
+def log_tensor_to_file(tensor, layer_idx, tag, suffix="", directory="/root/zhuangjh/vllm-hymeta/test_vllm/debug_logs", hidden_state_len=0):
     """Log a tensor to a unique file for debugging."""
     if (hidden_state_len != 8192) and (hidden_state_len != 8192 + 128):
         return
@@ -913,16 +913,22 @@ class IntraHybridAttention(nn.Module):
         hidden_states = (out_attn_norm + out_linear_norm) / 2
 
 
-        # log_tensor_to_file(hidden_states[:, :200], self.layer_idx, "out_swa_lin_avg", hidden_state_len=hidden_states.shape[0])
+        # log_tensor_to_file(hidden_states[:, :], self.layer_idx, "out_swa_lin_avg", hidden_state_len=hidden_states.shape[0])
 
         hidden_states = hidden_states.to(torch.bfloat16)
         hidden_states = self.out_proj(hidden_states)
         
-        assert torch.isnan(hidden_states).any() == False, \
-            f"IntraHybridAttention {self.layer_idx} forward has nan in hidden_states, " \
-            f"out_attn: {out_attn.shape}, out_linear: {out_linear.shape}, " \
-            f"out_attn has nan: {torch.isnan(out_attn).any()}, " \
-            f"out_linear has nan: {torch.isnan(out_linear).any()}, "
+        if torch.isnan(hidden_states).any():
+            # log_tensor_to_file(hidden_states[:, :], self.layer_idx, "hidden_states_after_out_proj", hidden_state_len=8192)
+            # log_tensor_to_file(out_attn_norm[:, :], self.layer_idx, "out_attn_norm", hidden_state_len=8192)
+            # log_tensor_to_file(out_linear_norm[:, :], self.layer_idx, "out_linear_norm", hidden_state_len=8192)
+            assert torch.isnan(hidden_states).any() == False, \
+                f"IntraHybridAttention {self.layer_idx} forward has nan in hidden_states, " \
+                f"out_attn: {out_attn.shape}, out_linear: {out_linear.shape}, " \
+                f"out_attn has nan: {torch.isnan(out_attn).any()}, min/max: {out_attn.min()}, {out_attn.max()}" \
+                f"out_attn_norm has nan: {torch.isnan(out_attn_norm).any()}, min/max: {out_attn_norm.min()}, {out_attn_norm.max()}" \
+                f"out_linear has nan: {torch.isnan(out_linear).any()}, min/max: {out_linear.min()}, {out_linear.max()}" \
+                f"out_linear_norm has nan: {torch.isnan(out_linear_norm).any()}, min/max: {out_linear_norm.min()}, {out_linear_norm.max()}" 
         return hidden_states
 
 class HybridBlock(nn.Module):

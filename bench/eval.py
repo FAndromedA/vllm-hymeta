@@ -9,22 +9,22 @@ models = [
     dict(
         type=VLLM,
         abbr='Hymeta-70B',
-        path='/root/docker_shared/Hybrid-MoE-TP1-PP4-EP8-NUM_DENSE7-HF',
-        model_kwargs=dict(tensor_parallel_size=4, 
+        path='/root/zhuangjh/hymeta-70B-8K',
+        model_kwargs=dict(tensor_parallel_size=2, 
                         #   pipeline_parallel_size=4,  # opencompass not support pp
-                          gpu_memory_utilization=0.95,
+                          gpu_memory_utilization=0.99,
                           enable_expert_parallel=True,
                           max_model_len=8192,
-                          block_size=64,
+                          block_size=256,
                           dtype='bfloat16',
                           enforce_eager=True,
                           trust_remote_code=True,
                           ),
         max_out_len=1024,
         max_seq_len=8192,
-        batch_size=4,
+        batch_size=2,
         generation_kwargs=dict(temperature=0),
-        run_cfg=dict(num_gpus=4),
+        run_cfg=dict(num_gpus=2),
     )
 ] 
 #http://0.0.0.0:8765
@@ -70,7 +70,7 @@ with read_base():
     from opencompass.configs.datasets.hellaswag.hellaswag_ppl import hellaswag_datasets
     from opencompass.configs.summarizers.example import summarizer
 
-datasets = [*ARC_c_datasets,]
+datasets = [*mmlu_datasets,]
 
 # 评测任务配置
 # tasks = [
