@@ -23,7 +23,7 @@ models = [
         #                   ),
         max_out_len=1024,
         max_seq_len=8192,
-        batch_size=4,
+        batch_size=8,
         generation_kwargs=dict(temperature=0),
         run_cfg=dict(num_gpus=1),
     ),
@@ -82,7 +82,7 @@ with read_base():
     from opencompass.configs.datasets.triviaqa.triviaqa_gen import triviaqa_datasets
 
 
-datasets = [*mmlu_datasets,]
+datasets = [*nq_datasets,]
 
 # 评测任务配置
 # tasks = [
