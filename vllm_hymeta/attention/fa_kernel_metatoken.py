@@ -23,6 +23,7 @@ import flash_attn_2_cuda as flash_attn_cuda
 if 'MHA_INPUT_COLLECTION' in os.environ:
     from flash_attn.tuning.modules.yaml_writer import YamlWriter
 
+
 def my_flash_attn_with_kvcache(
     q,
     k_cache,
@@ -109,8 +110,8 @@ def my_flash_attn_with_kvcache(
 
 @torch.jit.script
 def _update_out_and_lse(
-    out: torch.Tensor,
-    lse: torch.Tensor,
+    out: torch.Tensor, # [batch_size, seq_len, num_heads, head_dim]
+    lse: torch.Tensor, # [batch_size, num_heads, seq_len]
     block_out: torch.Tensor,
     block_lse: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -269,7 +270,9 @@ class FlashAttentionVarlenWithMetaToken(torch.autograd.Function):
         out2, lse2 = out2[0], out2[5]
         out, lse = _update_out_and_lse(out1, lse1, out2[:,:Lq], lse2[:,:,:Lq])
         # print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++" \
-        #      f"out shape: {out.shape}, lse shape: {lse.shape}, out2 shape: {out2.shape}, lse2 shape: {lse2.shape}")
+        #      f"out shape: {out.shape}, lse shape: {lse.shape}, " 
+        #      f"out1 shape: {out1.shape}, lse1 shape: {lse1.shape}, "
+        #      f"out2 shape: {out2.shape}, lse2 shape: {lse2.shape}")
         # 注意这里要把 meta token 即 out2[:, Lq:] 输出放前面
         out = torch.cat((out2[:, Lq:], out), dim=1) if q2 is not None else out
         # print(f"----------------------------------------------------after concat out shape: {out.shape}, q2 shape: {q2.shape if q2 is not None else None}")

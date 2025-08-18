@@ -41,9 +41,9 @@ def my_fused_recurrent_fwd_kernel(
     # Load decay factor g
 
     # Caculate offsets for dimensions
-    qk_d_offsets = tl.arange(0, D)
-    v_d_offsets = tl.arange(0, BLOCK_SIZE) + pid_d * BLOCK_SIZE
-    cache_d_offsets = qk_d_offsets[:, None] * cache_d0_stride + v_d_offsets[None, :] * cache_d1_stride
+    qk_d_offsets = tl.arange(0, D) # [D]
+    v_d_offsets = tl.arange(0, BLOCK_SIZE) + pid_d * BLOCK_SIZE # [BLOCK_SIZE]
+    cache_d_offsets = qk_d_offsets[:, None] * cache_d0_stride + v_d_offsets[None, :] * cache_d1_stride # [D, BLOCK_SIZE]
 
     # Caculate offsets for the current batch and head
     q_offset = batch_id * qkv_b_stride + head_id * qkv_h_stride
@@ -63,18 +63,18 @@ def my_fused_recurrent_fwd_kernel(
     g = tl.load(g_ptr + k_offset + qk_d_offsets, mask=qk_mask, other=0.0)
 
     # Compute key-value outer product
-    kv_outer = k[:, None] * v[None, :]
+    kv_outer = k[:, None] * v[None, :] # [D, BLOCK_SIZE]
     kv_mask = qk_mask[:, None] & v_mask[None, :]
 
     # Apply decay factor to previous KV cache
     ratio = tl.exp(g[:, None])
     kv_ptr = kv_cache_ptr + cache_offset + cache_d_offsets
     kv_cache_old = tl.load(kv_ptr, mask=kv_mask, other=0.0)
-    kv_cache_new = kv_outer + ratio * kv_cache_old
+    kv_cache_new = kv_outer + ratio * kv_cache_old # [D, BLOCK_SIZE]
 
     # Compute attention output
     output = q[:, None].to(tl.float32) * kv_cache_new
-    output = tl.sum(output, axis=0)
+    output = tl.sum(output, axis=0) # [BLOCK_SIZE]
 
     # Update KV cache and store output
     tl.store(kv_ptr, kv_cache_new, mask=kv_mask)

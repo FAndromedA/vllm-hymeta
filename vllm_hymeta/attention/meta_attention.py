@@ -237,9 +237,7 @@ class MetaAttentionMetadata(AttentionMetadata):
         assert ((self.seq_lens_tensor is not None)
                 or (self.encoder_seq_lens_tensor is not None))
         
-        # Compute some attn_metadata fields which default to None.
-        
-        #[:self.num_prefills + 1] is because it includes the end position.
+        # Compute some attn_metadata fields which default to None
         query_start_loc = (None if self.query_start_loc is None else
                            self.query_start_loc[:self.num_prefills + 1])
         slot_mapping = (None if self.slot_mapping is None else
@@ -295,6 +293,7 @@ class MetaAttentionMetadata(AttentionMetadata):
         assert ((self.seq_lens_tensor is not None)
                 or (self.encoder_seq_lens_tensor is not None))
         
+        # Compute some attn_metadata fields which default to None
         slot_mapping = (None if self.slot_mapping is None else
                         self.slot_mapping[self.num_prefill_tokens:])
         seq_lens_tensor = (None if self.seq_lens_tensor is None else
@@ -320,7 +319,7 @@ class MetaAttentionMetadata(AttentionMetadata):
             # in tokens:[3 prefills| 6 decodes], query_start_loc=[3,9] => [0,6]
             query_start_loc=(self.query_start_loc[self.num_prefills:] -
                              self.query_start_loc[self.num_prefills])
-            if self.seq_start_loc is not None else None,
+            if self.query_start_loc is not None else None,
             seq_start_loc=self.seq_start_loc[self.num_prefills:]
             if self.seq_start_loc is not None else None,
             context_lens_tensor=None,
@@ -346,14 +345,18 @@ class MetaAttentionMetadata(AttentionMetadata):
         """
         Update metadata in-place to advance one decode step.
         """
+        # When using cudagraph, the num_seqs is padded to the next captured
+        # batch sized, but num_queries tracks the actual number of requests in
+        # the batch. For --enforce-eager mode, num_seqs == num_queries
         if num_seqs != num_queries:
             assert num_seqs > num_queries
             assert self.use_cuda_graph
 
         if turn_prefills_into_decodes:
-            # When Multi-Step is enabled with chunked-prefill,
-            # prefills and decodes are scheduled together.
-            # In the first step, we need to turn prefills into decodes.
+            # When Multi-Step is enabled with Chunked-Prefill, prefills and
+            # decodes are scheduled together. In the first step, all the
+            # prefills turn into decodes. This update reflects that
+            # conversion.
             assert self.num_decode_tokens + self.num_prefills == num_seqs
             self.num_decode_tokens += self.num_prefills
             self.num_prefills = 0
@@ -395,17 +398,15 @@ class MetaAttentionMetadata(AttentionMetadata):
             self.seq_lens[i] += 1
         self.max_decode_seq_len = max(self.seq_lens)
 
-        ops.advance_step_flashattn(
-            num_seqs=num_seqs,
-            num_queries=num_queries,
-            block_size=block_size,
-            input_tokens=model_input.input_tokens,
-            sampled_token_ids=sampled_token_ids,
-            input_positions=model_input.input_positions,
-            seq_lens=self.seq_lens_tensor,
-            slot_mapping=self.slot_mapping,
-            block_tables=self.block_tables,
-        )
+        ops.advance_step_flashattn(num_seqs=num_seqs,
+                                   num_queries=num_queries,
+                                   block_size=block_size,
+                                   input_tokens=model_input.input_tokens,
+                                   sampled_token_ids=sampled_token_ids,
+                                   input_positions=model_input.input_positions,
+                                   seq_lens=self.seq_lens_tensor,
+                                   slot_mapping=self.slot_mapping,
+                                   block_tables=self.block_tables)
 
 class MetaAttentionMetadataBuilder(
     AttentionMetadataBuilder[MetaAttentionMetadata]
@@ -466,9 +467,14 @@ class MetaAttentionMetadataBuilder(
                 self.num_decode_tokens += query_len
                 self.curr_seq_lens.append(curr_seq_len)
 
-            # Compute the block table for the sequence.
+            # Compute block table.
+            # TODO(sang): Combine chunked prefill and prefix caching by
+            # only allowing multiple of block_size chunk size.
+            # NOTE: This only works for oooooooxxx style attention.
             block_table = []
             if prefix_cache_hit:
+                # NOTE(woosuk): For flash-attn, the block table should
+                # include the entries for the incoming prefill tokens.
                 block_table = block_tables[seq_id]
             elif ((chunked_prefill_enabled or not is_prompt)
                   and block_tables is not None):
@@ -478,7 +484,7 @@ class MetaAttentionMetadataBuilder(
                     block_table = block_tables[seq_id][-curr_sliding_window_block:]
             self.block_tables.append(block_table)
 
-            # Update the slot mapping.
+            # Compute slot mapping.
             is_profile_run = is_block_tables_empty(block_tables)
             start_idx = compute_slot_mapping_start_idx(is_prompt, query_len,
                                                        context_len,
@@ -491,7 +497,7 @@ class MetaAttentionMetadataBuilder(
             self, num_seqs: int,
             block_tables: List[List[int]]) -> torch.Tensor:
         # The shape of graph_block_tables is
-        # [max batch size, max context len // block_size]
+        # [max batch size, max context len // block size].
         max_batch_size, max_blocks = self.runner.graph_block_tables.shape
         assert max_batch_size >= num_seqs
 
@@ -856,7 +862,6 @@ class MetaAttentionImpl(AttentionImpl):
                     value = value.reshape((num_key_tokens, num_kv_heads, head_size))
                 
                 # descale_shape = (q_seq_start_loc.shape[0] -1, key.shape[1])
-
                 output[:num_meta_prefill_tokens] = metatoken_flash_attn_varlen_func(  # prefill_output
                     q1=query,
                     q2=query2,
@@ -874,6 +879,7 @@ class MetaAttentionImpl(AttentionImpl):
                     causal=_get_causal_option(attn_type),
                     window_size=window_size,
                     alibi_slopes=alibi_slopes,
+                    softcap=logits_soft_cap,
                 )
             else:
                 # prefix-enabled attention
@@ -897,10 +903,10 @@ class MetaAttentionImpl(AttentionImpl):
                     k2=key2,
                     v1=value,
                     v2=value2,
-                    cu_seqlens_q=q_seq_start_loc,
-                    cu_seqlens_k=k_seq_start_loc,
-                    max_seqlen_q=q_seq_len,
-                    max_seqlen_k=k_seq_len,
+                    cu_seqlens_q=prefill_meta.query_start_loc,
+                    cu_seqlens_k=prefill_meta.seq_start_loc,
+                    max_seqlen_q=prefill_meta.max_query_len,
+                    max_seqlen_k=max_seq_len,
                     num_meta_tokens=self.num_meta_tokens,
                     dropout_p=0.0,
                     softmax_scale=softmax_scale,
@@ -925,14 +931,15 @@ class MetaAttentionImpl(AttentionImpl):
                 # )
                 output[num_meta_prefill_tokens:] = metatoken_flash_attn_varlen_func(  # decode_output
                     q1=decode_query,
-                    q2=query2,
+                    q2=None, # query2 is None for decode
                     k1=key_cache,
                     k2=key2,
                     v1=value_cache,
                     v2=value2,
                     cu_seqlens_q=decode_meta.query_start_loc,
                     max_seqlen_q=decode_meta.max_decode_query_len,
-                    seqused_k=decode_meta.seq_lens_tensor,
+                    # seqused_k=decode_meta.seq_lens_tensor,
+                    cu_seqlens_k=decode_meta.seq_start_loc,
                     max_seqlen_k=decode_meta.max_decode_seq_len,
                     num_meta_tokens=self.num_meta_tokens,
                     dropout_p=0.0,
@@ -956,7 +963,7 @@ class MetaAttentionImpl(AttentionImpl):
                 # descale_shape = (seq_lens_arg.shape[0], key_cache.shape[-2])
                 output[num_meta_prefill_tokens:] = metatoken_flash_attn_with_kvcache(  # decode_output
                     q1=decode_query,
-                    q2=query2,
+                    q2=None, # query2 is None for decode
                     k2=key2,
                     v2=value2,
                     key_cache=key_cache,

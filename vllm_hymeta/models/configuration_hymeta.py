@@ -67,7 +67,7 @@ class HymetaConfig(PretrainedConfig):
         self.rope_theta = rope_theta
         self.attention_dropout = attention_dropout
         self.fuse_cross_entropy = fuse_cross_entropy
-        self.full_attn_layers = [3, 11, 19, 27]
+        self.full_attn_layers = [3, 10, 17, 24]
         # dense MLP 层的索引
         self.dense_mlp_layers = [0, 1, 2, 4, 6, 8, 10]
 
@@ -90,6 +90,13 @@ class HymetaConfig(PretrainedConfig):
         self.num_experts_per_topk = num_experts_per_topk
         self.router_jitter_noise = router_jitter_noise
         self.shared_intermediate_size=shared_intermediate_size
+        
+        for key, value in kwargs.items():
+            # print(key, value)
+            # quantization_config
+            if key == "quantization_config":
+                self.quantization_config = dict(value)
+        
         super().__init__(
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,
