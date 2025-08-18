@@ -162,7 +162,7 @@ class FlashAttentionWithMetaToken(torch.autograd.Function):
             cache_seqlens=cache_seqlens,
             softmax_scale=softmax_scale,
             causal=True,
-            window_size=(window_size[0] - 1, -1),
+            window_size=(window_size[0], -1),
             alibi_slopes=alibi_slopes,
             softcap=softcap,
         )
@@ -178,13 +178,15 @@ class FlashAttentionWithMetaToken(torch.autograd.Function):
             dropout_p=dropout_p,
             softmax_scale=softmax_scale,
             causal=False,
-            window_size=(-1, -1),
+            window_size_left=-1,
+            window_size_right=-1,
+            # window_size=(-1, -1),
             alibi_slopes=alibi_slopes,
             # attn_mask=attn_mask,
             return_softmax=return_attn_probs,
             softcap=softcap,
         )
-        out2, lse2 = out2[0], out2[5] # [seq_len=1, batch_size=decode_one_nums, num_heads, head_dim], [seq_len=1, num_heads, batch_size=decode_one_nums]
+        out2, lse2 = out2[0], out2[1] # [seq_len=1, batch_size=decode_one_nums, num_heads, head_dim], [seq_len=1, num_heads, batch_size=decode_one_nums]
         out2 = out2.transpose(0, 1) # [batch_size=decode_one_nums, seq_len=1, num_heads, head_dim]
         lse2 = lse2.transpose(0, 2) # [batch_size=decode_one_nums, num_heads, seq_len=1]
         out, lse = _update_out_and_lse(out1, lse1, out2[:,:Lq], lse2[:,:,:Lq])
@@ -241,13 +243,15 @@ class FlashAttentionVarlenWithMetaToken(torch.autograd.Function):
             dropout_p=dropout_p,
             softmax_scale=softmax_scale,
             causal=True,
-            window_size=(window_size[0], -1), #  window_size[0] already minus 1
+            window_size_left=window_size[0],
+            window_size_right=window_size[1],
+            # window_size=(window_size[0], -1), #  window_size[0] already minus 1 at MetaAttentionImpl
             alibi_slopes=alibi_slopes,
             return_softmax=return_attn_probs,
             softcap=softcap,
             block_table=block_tables,
         )
-        out1, lse1 = out1[0].unsqueeze(0), out1[5]
+        out1, lse1 = out1[0].unsqueeze(0), out1[1] # flash_attn 2.7.3 out[1], 2.6.3 out[5]
         # lse1 = rearrange(lse1, "b h l -> 1 h (b l)").contiguous()
         lse1 = lse1.unsqueeze(0).contiguous()  # [1, num_heads, num_tokens]
  
@@ -261,13 +265,15 @@ class FlashAttentionVarlenWithMetaToken(torch.autograd.Function):
             dropout_p=dropout_p,
             softmax_scale=softmax_scale,
             causal=False, # ? 官方实现不一样 https://github.com/NVlabs/hymba/blob/main/barebones_hymba/barebones_hymba_block.py
-            window_size=(-1, -1),
+            window_size_left=-1,
+            window_size_right=-1,
+            # window_size=(-1, -1),
             alibi_slopes=alibi_slopes,
             # attn_mask=attn_mask,
             return_softmax=return_attn_probs,
             softcap=softcap,
         )
-        out2, lse2 = out2[0], out2[5] # [1, num_tokens, num_heads, head_dim], [1, num_heads, num_tokens]
+        out2, lse2 = out2[0], out2[1] # [1, num_tokens, num_heads, head_dim], [1, num_heads, num_tokens]
         out, lse = _update_out_and_lse(out1, lse1, out2[:,:Lq], lse2[:,:,:Lq])
         # print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++" \
         #      f"out shape: {out.shape}, lse shape: {lse.shape}, " 

@@ -9,12 +9,12 @@ from opencompass.models import HuggingFaceBaseModel
 models = [
     dict(
         type=VLLM,
-        abbr='Hymeta-70B',
-        path='/root/zhuangjh/hymeta-70B-8K',
-        model_kwargs=dict(tensor_parallel_size=4, 
+        abbr='Qwen2.5-7B-base',
+        path='/root/zhuangjh/modelbase/Qwen2.5_7B',
+        model_kwargs=dict(tensor_parallel_size=1, 
                         #   pipeline_parallel_size=4,  # opencompass not support pp
                           gpu_memory_utilization=0.64,
-                          enable_expert_parallel=True,
+                        #   enable_expert_parallel=True,
                           max_model_len=8192,
                           block_size=256,
                           dtype='bfloat16',
@@ -23,10 +23,11 @@ models = [
                           ),
         max_out_len=1024,
         max_seq_len=8192,
-        batch_size=32,
+        batch_size=8,
         generation_kwargs=dict(temperature=0),
-        run_cfg=dict(num_gpus=4),
-    )
+        run_cfg=dict(num_gpus=1),
+    ),
+    
 ] 
 #http://0.0.0.0:8765
 
@@ -64,24 +65,24 @@ models = [
 
 ### 第二步：定义tasks
 with read_base():
-    # from opencompass.configs.datasets.mmlu.mmlu_ppl import mmlu_datasets
-    from opencompass.configs.datasets.mmlu.mmlu_gen import mmlu_datasets
-    # from opencompass.configs.datasets.cmmlu.cmmlu_ppl import cmmlu_datasets
-    from opencompass.configs.datasets.cmmlu.cmmlu_gen import cmmlu_datasets
+    from opencompass.configs.datasets.mmlu.mmlu_ppl import mmlu_datasets
+    # from opencompass.configs.datasets.mmlu.mmlu_gen import mmlu_datasets
+    from opencompass.configs.datasets.cmmlu.cmmlu_ppl import cmmlu_datasets
+    # from opencompass.configs.datasets.cmmlu.cmmlu_gen import cmmlu_datasets
     # from opencompass.configs.datasets.ARC_c.ARC_c_ppl import ARC_c_datasets
-    # from opencompass.configs.datasets.ARC_c.ARC_c_clean_ppl import ARC_c_datasets
+    from opencompass.configs.datasets.ARC_c.ARC_c_clean_ppl import ARC_c_datasets
     # from opencompass.configs.datasets.ARC_c.ARC_c_gen import ARC_c_datasets
-    # from opencompass.configs.datasets.hellaswag.hellaswag_ppl import hellaswag_datasets
+    from opencompass.configs.datasets.hellaswag.hellaswag_ppl import hellaswag_datasets
     # from opencompass.configs.datasets.hellaswag.hellaswag_gen import hellaswag_datasets
 
     from opencompass.configs.summarizers.example import summarizer
-    # from opencompass.configs.datasets.ceval.ceval_ppl import ceval_datasets
-    from opencompass.configs.datasets.ceval.ceval_gen import ceval_datasets
+    from opencompass.configs.datasets.ceval.ceval_ppl import ceval_datasets
+    # from opencompass.configs.datasets.ceval.ceval_gen import ceval_datasets
     from opencompass.configs.datasets.nq.nq_gen import nq_datasets
     from opencompass.configs.datasets.triviaqa.triviaqa_gen import triviaqa_datasets
 
 
-datasets = [*nq_datasets,]
+datasets = [*hellaswag_datasets,]
 
 # 评测任务配置
 # tasks = [

@@ -49,6 +49,7 @@ class MetaAttention(nn.Module):
         use_mla: bool = False,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[str] = None,
         num_meta_tokens: int = 128,
         **extra_impl_args,
     ) -> None:
@@ -130,12 +131,14 @@ class MetaAttention(nn.Module):
                                         kv_cache_dtype,
                                         block_size,
                                         is_attention_free,
-                                        blocksparse_params is not None,
-                                        use_mla=use_mla)
+                                        # blocksparse_params is not None,
+                                        use_mla=use_mla,
+                                        )
         impl_cls = attn_backend.get_impl_cls()
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window, kv_cache_dtype,
                              blocksparse_params, logits_soft_cap, attn_type,
+                             kv_sharing_target_layer_name,
                              num_meta_tokens=num_meta_tokens, # MetaAttentionBackend
                              **extra_impl_args)
         self.backend = backend_name_to_enum(attn_backend.get_name())
@@ -155,6 +158,14 @@ class MetaAttention(nn.Module):
         compilation_config.static_forward_context[prefix] = self
         self.layer_name = prefix
         self.attn_type = attn_type
+        # V0 Engine not support kv sharing
+        # if kv_sharing_target_layer_name is not None:
+        #     validate_kv_sharing_target(
+        #         prefix,
+        #         kv_sharing_target_layer_name,
+        #         compilation_config.static_forward_context,
+        #     )
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
         # use a placeholder kv cache tensor during init, which will be replaced
         # by bind_kv_cache
         # this variable will not be accessed if use_direct_call is True

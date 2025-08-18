@@ -55,7 +55,7 @@ from vllm.model_executor.models.utils import PPMissingLayer, is_pp_missing_param
 from vllm.model_executor.models.interfaces import HasInnerState, IsHybrid, SupportsV0Only, SupportsPP
 from vllm.sequence import IntermediateTensors
 
-from fla.modules import ShortConvolution
+# from fla.modules import ShortConvolution
 from fla.ops.gla import fused_chunk_gla, fused_recurrent_gla
 
 from .my_fused_recurrent_gla import my_fused_recurrent_gla
@@ -303,11 +303,11 @@ class HymetaMoE(nn.Module):
             self.num_total_experts,
             bias=False,
             params_dtype=params_dtype,
-            quant_config=None,
+            quant_config=self.quant_config,
             prefix=f'{prefix}.gate',
             return_bias=False
         )
-        self.gate.weight.weight_loader = HymetaMoE.gate_weight_loader
+        # self.gate.weight.weight_loader = HymetaMoE.gate_weight_loader
 
         self.experts = FusedMoE(
             num_experts=self.num_total_experts,
@@ -658,12 +658,12 @@ class HLinearAttention(nn.Module):
         
         return outputs
 
-    def state_size(self, **kwargs) -> int:
-        state_size = self.key_dim * self.head_dim
-        for module in self.children():
-            if isinstance(module, ShortConvolution):
-                state_size += module.state_size
-        return state_size
+    # def state_size(self, **kwargs) -> int:
+    #     state_size = self.key_dim * self.head_dim
+    #     for module in self.children():
+    #         if isinstance(module, ShortConvolution):
+    #             state_size += module.state_size
+    #     return state_size
 
 
 class FlashAttention(nn.Module):
@@ -799,19 +799,19 @@ class FlashAttention(nn.Module):
         #       f"attn_output min/max: {attn_output.min()}/{attn_output.max()}, "
         #       f"attn_output all zeros: {torch.all(attn_output == 0)}, "
         # )
-        if torch.isnan(attn_output).any():
-            print(f"Warning: FlashAttention{self.layer_idx} has nan in attn_output, "
-                  f"attn_output shape: {attn_output.shape}, "
-                  f"attn_output sample: {attn_output}, \n"
-                  f"q1 shape: {q1.shape}, k1 shape: {k1.shape}, v1 shape: {v1.shape}, \n"
-                  f"q2 shape: {q2.shape if q2 is not None else 'None'}, "
-                  f"k2 shape: {k2.shape if k2 is not None else 'None'}, "
-                  f"v2 shape: {v2.shape if v2 is not None else 'None'}\n"
-                  f"q1 sample: {q1},\n k1 sample: {k1},\n v1 sample: {v1}, \n"
-                  f"q2 sample: {q2 if q2 is not None else 'None'}, \n"
-                  f"k2 sample: {k2 if k2 is not None else 'None'}, \n"
-                  f"v2 sample: {v2 if v2 is not None else 'None'}")
-            exit(0)
+        # if torch.isnan(attn_output).any():
+        #     print(f"Warning: FlashAttention{self.layer_idx} has nan in attn_output, "
+        #           f"attn_output shape: {attn_output.shape}, "
+        #           f"attn_output sample: {attn_output}, \n"
+        #           f"q1 shape: {q1.shape}, k1 shape: {k1.shape}, v1 shape: {v1.shape}, \n"
+        #           f"q2 shape: {q2.shape if q2 is not None else 'None'}, "
+        #           f"k2 shape: {k2.shape if k2 is not None else 'None'}, "
+        #           f"v2 shape: {v2.shape if v2 is not None else 'None'}\n"
+        #           f"q1 sample: {q1},\n k1 sample: {k1},\n v1 sample: {v1}, \n"
+        #           f"q2 sample: {q2 if q2 is not None else 'None'}, \n"
+        #           f"k2 sample: {k2 if k2 is not None else 'None'}, \n"
+        #           f"v2 sample: {v2 if v2 is not None else 'None'}")
+        #     exit(0)
         return attn_output
 
 class IntraHybridAttention(nn.Module):
@@ -857,7 +857,8 @@ class IntraHybridAttention(nn.Module):
 
         self.out_proj =  RowParallelLinear(
             self.num_heads * self.head_dim, self.hidden_size, 
-            bias=False, prefix=f"{prefix}.out_proj", return_bias=False)
+            bias=False, prefix=f"{prefix}.out_proj", 
+            quant_config=quant_config, return_bias=False)
         self.norm1 = HymetaRMSNormTP(hidden_size=config.hidden_size, eps=config.norm_eps)
         self.norm2 = HymetaRMSNormTP(hidden_size=config.hidden_size, eps=config.norm_eps)
 
@@ -918,17 +919,17 @@ class IntraHybridAttention(nn.Module):
         hidden_states = hidden_states.to(torch.bfloat16)
         hidden_states = self.out_proj(hidden_states)
         
-        if torch.isnan(hidden_states).any():
-            # log_tensor_to_file(hidden_states[:, :], self.layer_idx, "hidden_states_after_out_proj", hidden_state_len=8192)
-            # log_tensor_to_file(out_attn_norm[:, :], self.layer_idx, "out_attn_norm", hidden_state_len=8192)
-            # log_tensor_to_file(out_linear_norm[:, :], self.layer_idx, "out_linear_norm", hidden_state_len=8192)
-            assert torch.isnan(hidden_states).any() == False, \
-                f"IntraHybridAttention {self.layer_idx} forward has nan in hidden_states, " \
-                f"out_attn: {out_attn.shape}, out_linear: {out_linear.shape}, " \
-                f"out_attn has nan: {torch.isnan(out_attn).any()}, min/max: {out_attn.min()}, {out_attn.max()}" \
-                f"out_attn_norm has nan: {torch.isnan(out_attn_norm).any()}, min/max: {out_attn_norm.min()}, {out_attn_norm.max()}" \
-                f"out_linear has nan: {torch.isnan(out_linear).any()}, min/max: {out_linear.min()}, {out_linear.max()}" \
-                f"out_linear_norm has nan: {torch.isnan(out_linear_norm).any()}, min/max: {out_linear_norm.min()}, {out_linear_norm.max()}" 
+        # if torch.isnan(hidden_states).any():
+        #     # log_tensor_to_file(hidden_states[:, :], self.layer_idx, "hidden_states_after_out_proj", hidden_state_len=8192)
+        #     # log_tensor_to_file(out_attn_norm[:, :], self.layer_idx, "out_attn_norm", hidden_state_len=8192)
+        #     # log_tensor_to_file(out_linear_norm[:, :], self.layer_idx, "out_linear_norm", hidden_state_len=8192)
+        #     assert torch.isnan(hidden_states).any() == False, \
+        #         f"IntraHybridAttention {self.layer_idx} forward has nan in hidden_states, " \
+        #         f"out_attn: {out_attn.shape}, out_linear: {out_linear.shape}, " \
+        #         f"out_attn has nan: {torch.isnan(out_attn).any()}, min/max: {out_attn.min()}, {out_attn.max()}" \
+        #         f"out_attn_norm has nan: {torch.isnan(out_attn_norm).any()}, min/max: {out_attn_norm.min()}, {out_attn_norm.max()}" \
+        #         f"out_linear has nan: {torch.isnan(out_linear).any()}, min/max: {out_linear.min()}, {out_linear.max()}" \
+        #         f"out_linear_norm has nan: {torch.isnan(out_linear_norm).any()}, min/max: {out_linear_norm.min()}, {out_linear_norm.max()}" 
         return hidden_states
 
 class HybridBlock(nn.Module):
@@ -1038,8 +1039,8 @@ class HybridBlock(nn.Module):
         norm_hidden_states, residual = self.mlp_norm(hidden_states, residual)
         # log_tensor_to_file(norm_hidden_states[:, :], self.layer_idx, "after_mlp_norm", hidden_state_len=hidden_states.shape[0])
 
-        assert torch.isnan(norm_hidden_states).any() == False, \
-            f"HybridBlock {self.layer_idx} forward after attn has nan in norm_hidden_states, "
+        # assert torch.isnan(norm_hidden_states).any() == False, \
+        #     f"HybridBlock {self.layer_idx} forward after attn has nan in norm_hidden_states, "
         if self.expert_num == 1:
             hidden_states = self.mlp(norm_hidden_states)
             # log_tensor_to_file(hidden_states[:, :], self.layer_idx, "after_mlp", hidden_state_len=hidden_states.shape[0])
@@ -1069,8 +1070,8 @@ class HybridBlock(nn.Module):
         hidden_states = residual + hidden_states
         # log_tensor_to_file(hidden_states[:, :], self.layer_idx, "final_output", hidden_state_len=hidden_states.shape[0])
 
-        assert torch.isnan(hidden_states).any() == False, \
-            f"HybridBlock {self.layer_idx} forward after mlp or moe has nan in hidden_states, " 
+        # assert torch.isnan(hidden_states).any() == False, \
+        #     f"HybridBlock {self.layer_idx} forward after mlp or moe has nan in hidden_states, " 
         return hidden_states, None
     
     # @staticmethod
@@ -1088,6 +1089,7 @@ class HymetaModel(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         cache_config: Optional[CacheConfig] = None,
         scheduler_config=None,
+        enforce_eager=False,
         prefix: str = "",
     ):
         super().__init__()
@@ -1156,7 +1158,7 @@ class HymetaModel(nn.Module):
         del _dummy
 
         self.has_meta_cache = 0 # Become True after the first forward pass through all layers.
-        self.meta_cache_threshold = 2 # if enforce_eager else 37, 第一层也是 2 是因为需要给后面的层传
+        self.meta_cache_threshold = 2 if enforce_eager else 37 # 第一层也是 2 是因为需要给后面的层传
         # but when the vllm is launching, it will run several times ignoring the order of pipelines
         # so we must set it True until it has run beyond a threshold, here we let it be 2 if --enforce-eager
         # else we let it be 1(128k) + 256/8(256,248,...,8) + 3(4, 2, 1) + 1(True request) = 1 + 32 + 3 + 1 = 37
@@ -1284,7 +1286,7 @@ class HymetaModel(nn.Module):
             residual = None
 
             # meta_token 的插入需要在第一个 pipeline stage 处理
-            if input_meta_tokens:
+            if input_meta_tokens and attn_metadata.num_prefill_tokens > 0:
                 hidden_states = torch.cat(
                     (self.meta_tokens, hidden_states), dim=0
                 ) # [num_tokens, hidden_size]
@@ -1299,7 +1301,7 @@ class HymetaModel(nn.Module):
                 self.has_meta_cache < self.meta_cache_threshold:
             # 这是 vllm 一开始的测试运行, 由于 pipeline parallel 它是并行一起测试的
             # 所以 hidden_states 并不是来源于上一层 pipeline，因此没有上一层的 meta tokens
-            assert get_pp_group().is_first_rank is False
+            # assert get_pp_group().is_first_rank is False
             is_vllm_testing = True
 
         attn_metadata.rotary_emb = self.rotary_emb
@@ -1374,6 +1376,12 @@ class HymetaModel(nn.Module):
 
 
 class HymetaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only, SupportsPP):
+    
+    config_class = HymetaConfig
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"]
+    }
 
     def __init__(self, *, 
                  vllm_config: VllmConfig,
@@ -1398,7 +1406,8 @@ class HymetaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only, Supp
             quant_config=quant_config,
             cache_config=vllm_config.cache_config,
             scheduler_config=vllm_config.scheduler_config,
-            prefix=maybe_prefix(prefix, "model")
+            enforce_eager=vllm_config.model_config.enforce_eager,
+            prefix=maybe_prefix(prefix, "model"),
         )
 
         if get_pp_group().is_last_rank:
