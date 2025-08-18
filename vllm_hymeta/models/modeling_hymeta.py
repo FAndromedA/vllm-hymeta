@@ -791,6 +791,7 @@ class FlashAttention(nn.Module):
             k2 = kv_caches.meta_fattn_cache[0]
             v2 = kv_caches.meta_fattn_cache[1]
 
+
         attn_output = self.attn(q1, k1, v1, query2=q2, key2=k2, value2=v2)
         # if is_vllm_testing == False and torch.isnan(attn_output).any():
         #     warnings.warn(f"FlashAttention{self.layer_idx} after forward, "

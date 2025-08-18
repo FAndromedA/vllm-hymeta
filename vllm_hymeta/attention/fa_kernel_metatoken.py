@@ -225,7 +225,8 @@ class FlashAttentionVarlenWithMetaToken(torch.autograd.Function):
         if softmax_scale is None:
             softmax_scale = q1.shape[-1] ** (-0.5)
         assert causal and window_size[1] in [0, -1]
-        assert num_meta_tokens == k2.shape[0]
+        if k2 is not None:
+            assert num_meta_tokens == k2.shape[0]
         if q2 is not None:
             assert Lq == Lk, "meta_tokens' query doesn't support decoding"
             assert num_meta_tokens == q2.shape[0]
@@ -267,7 +268,7 @@ class FlashAttentionVarlenWithMetaToken(torch.autograd.Function):
             return_softmax=return_attn_probs,
             softcap=softcap,
         )
-        out2, lse2 = out2[0], out2[5]
+        out2, lse2 = out2[0], out2[5] # [1, num_tokens, num_heads, head_dim], [1, num_heads, num_tokens]
         out, lse = _update_out_and_lse(out1, lse1, out2[:,:Lq], lse2[:,:,:Lq])
         # print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++" \
         #      f"out shape: {out.shape}, lse shape: {lse.shape}, " 

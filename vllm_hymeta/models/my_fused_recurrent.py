@@ -3,8 +3,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils import chunk_global_cumsum, chunk_global_reversed_cumsum
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
+from fla.utils import autocast_custom_fwd, contiguous
 
 @triton.jit
 def my_fused_recurrent_fwd_kernel(
