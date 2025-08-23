@@ -3,7 +3,7 @@
 ## 1. 介绍
 ***vllm-hymeta*** 是模型 hymeta 对 [vllm 推理框架](https://github.com/vllm-project/vllm/tree/main) 的适配 plugins，目前实现了 hymeta 在 nvidia 和 metaX GPU 平台上的 vllm 推理适配。
 
-vllm plugins 机制提供了一种灵活、模块化的方法来集成后端，使用 plugins 的好处有：
+[vllm plugins](https://blog.vllm.ai/2025/05/12/hardware-plugin.html) 机制提供了一种灵活、模块化的方法来集成后端，使用 plugins 的好处有：
 - 解耦代码库：硬件后端插件代码保持独立，使 vLLM 核心代码更清晰。
 - 减少维护负担：vLLM 开发人员可以专注于通用功能，而不会被后端特定实现所造成的差异所困扰。
 - 更快的集成和更独立：新的后端可以快速集成，减少工作量并独立发展。
@@ -102,6 +102,8 @@ torch==2.6.0
 
 ---
 ## 3. 使用
+
+如果需要使用其它的使用 flash-attn 作为 attention backend 的模型，或者使用 hymeta-7B 架构，那么在不卸载插件的情况下，您可以设置环境变量VLLM_ATTENTION_BACKEND="XFORMERS"。
 
 ### 3.1 利用 vllm cli 部署 hymeta 模型：
 

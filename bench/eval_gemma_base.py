@@ -1,31 +1,32 @@
 from mmengine.config import read_base
 
 from opencompass.models import OpenAISDK, VLLM
-from opencompass.models import VLLMwithChatTemplate
+from opencompass.models import VLLMwithChatTemplate, VLLM
 # from opencompass.tasks import OpenICLTask
 from opencompass.models import HuggingFaceBaseModel
 import torch
 #vllm
 models = [
     dict(
-        type=HuggingFaceBaseModel,
-        abbr='Falcon-Mamba-7B-Base',
-        path='/root/zhuangjh/modelbase/Falcon_Mamba_7B',
-        # model_kwargs=dict(tensor_parallel_size=1, 
-        #                 #   pipeline_parallel_size=4,  # opencompass not support pp
-        #                 #   enable_expert_parallel=True,
-        #                 #   max_model_len=8192,
-        #                 #   block_size=256,
-        #                 #   dtype='bfloat16',
-        #                   torch_dtype=torch.float16,
-        #                 #   enforce_eager=True,
-        #                   trust_remote_code=True,
-        #                   ),
+        type=VLLM,
+        abbr='Gemma-2-27B-Base',
+        path='/root/zhuangjh/modelbase/Gemma_2_27B',
+        model_kwargs=dict(tensor_parallel_size=2, 
+                        #   pipeline_parallel_size=4,  # opencompass not support pp
+                          # enable_expert_parallel=True,
+                          gpu_memory_utilization=0.7,
+                          max_model_len=8192,
+                          block_size=256,
+                          dtype='bfloat16',
+                        #   torch_dtype=torch.float16,
+                          enforce_eager=True,
+                          trust_remote_code=True,
+                          ),
         max_out_len=1024,
         max_seq_len=8192,
         batch_size=8,
         generation_kwargs=dict(temperature=0),
-        run_cfg=dict(num_gpus=1),
+        run_cfg=dict(num_gpus=2),
     ),
     
 ] 
@@ -82,7 +83,7 @@ with read_base():
     from opencompass.configs.datasets.triviaqa.triviaqa_gen import triviaqa_datasets
 
 
-datasets = [*triviaqa_datasets,]
+datasets = [*ceval_datasets,]
 
 # 评测任务配置
 # tasks = [

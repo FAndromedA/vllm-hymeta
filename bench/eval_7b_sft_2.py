@@ -3,14 +3,16 @@ from mmengine.config import read_base
 from opencompass.models import OpenAISDK, VLLM
 from opencompass.models import VLLMwithChatTemplate
 # from opencompass.tasks import OpenICLTask
-from opencompass.models import HuggingFaceBaseModel
+from opencompass.models import HuggingFaceBaseModel, HuggingFacewithChatTemplate
 import torch
+from opencompass.utils.text_postprocessors import extract_non_reasoning_content
+from opencompass.datasets import IFEvalDataset, IFEvaluator
 #vllm
 models = [
     dict(
-        type=HuggingFaceBaseModel,
-        abbr='Falcon-Mamba-7B-Base',
-        path='/root/zhuangjh/modelbase/Falcon_Mamba_7B',
+        type=HuggingFacewithChatTemplate,
+        abbr='V1-7B-s2-chat',
+        path='/root/zhuangjh/modelbase/V1-7B-sft-s2-chat',
         # model_kwargs=dict(tensor_parallel_size=1, 
         #                 #   pipeline_parallel_size=4,  # opencompass not support pp
         #                 #   enable_expert_parallel=True,
@@ -23,9 +25,11 @@ models = [
         #                   ),
         max_out_len=1024,
         max_seq_len=8192,
-        batch_size=8,
+        batch_size=4,
+        pred_postprecessor=dict(type=extract_non_reasoning_content),
         generation_kwargs=dict(temperature=0),
         run_cfg=dict(num_gpus=1),
+        
     ),
     
 ] 
@@ -80,9 +84,47 @@ with read_base():
     # from opencompass.configs.datasets.ceval.ceval_gen import ceval_datasets
     from opencompass.configs.datasets.nq.nq_gen import nq_datasets
     from opencompass.configs.datasets.triviaqa.triviaqa_gen import triviaqa_datasets
+    # from opencompass.configs.datasets.IFEval.IFEval_gen import ifeval_datasets
+    from opencompass.configs.datasets.QuALITY.QuALITY_gen import QuALITY_datasets
 
 
-datasets = [*triviaqa_datasets,]
+
+from opencompass.openicl.icl_prompt_template import PromptTemplate
+from opencompass.openicl.icl_retriever import ZeroRetriever
+from opencompass.openicl.icl_inferencer import GenInferencer
+from opencompass.datasets import IFEvalDataset, IFEvaluator
+
+ifeval_reader_cfg = dict(
+    input_columns=['prompt'], output_column='reference')
+
+ifeval_infer_cfg = dict(
+    prompt_template=dict(
+        type=PromptTemplate,
+        template=dict(round=[
+            dict(
+                role='HUMAN',
+                prompt='{prompt}'),
+        ])),
+    retriever=dict(type=ZeroRetriever),
+    inferencer=dict(type=GenInferencer))
+
+ifeval_eval_cfg = dict(
+    evaluator=dict(type=IFEvaluator),
+    pred_role='BOT',
+    pred_postprecessor=dict(type=extract_non_reasoning_content),
+)
+ifeval_datasets = [
+    dict(
+        abbr='IFEval',
+        type=IFEvalDataset,
+        path='data/ifeval/input_data.jsonl',
+        reader_cfg=ifeval_reader_cfg,
+        infer_cfg=ifeval_infer_cfg,
+        eval_cfg=ifeval_eval_cfg)
+]
+
+
+datasets = [*QuALITY_datasets,]
 
 # 评测任务配置
 # tasks = [

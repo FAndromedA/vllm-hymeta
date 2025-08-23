@@ -11,7 +11,7 @@ models = [
         type=HuggingFaceBaseModel,
         abbr='Zamba-7B-V1-Base',
         path='/root/zhuangjh/modelbase/Zamba_7B_V1',
-        model_kwargs=dict(use_mamba_kernels=False,),
+        # model_kwargs=dict(,),
         max_out_len=1024,
         max_seq_len=8192,
         batch_size=8,
@@ -73,7 +73,7 @@ with read_base():
     from opencompass.configs.datasets.triviaqa.triviaqa_gen import triviaqa_datasets
 
 
-datasets = [*ceval_datasets,]
+datasets = [*triviaqa_datasets,]
 
 # 评测任务配置
 # tasks = [

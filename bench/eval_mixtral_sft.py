@@ -1,31 +1,45 @@
 from mmengine.config import read_base
 
 from opencompass.models import OpenAISDK, VLLM
-from opencompass.models import VLLMwithChatTemplate
+from opencompass.models import VLLMwithChatTemplate, VLLM
 # from opencompass.tasks import OpenICLTask
 from opencompass.models import HuggingFaceBaseModel
 import torch
+
+meta_template = dict(
+    round=[
+        dict(role="HUMAN", begin="[INST] ", end=" [/INST]"),  # 用户消息
+        dict(role="BOT", begin="", end="</s>", generate=True)  # 模型响应
+    ],
+    reserved_roles=[
+        dict(role="SYSTEM", begin="<s>", end="</s>")  # 系统消息（可选）
+    ],
+    begin="<s>",  # 对话开始标记
+    end="</s>"     # 对话结束标记
+)
 #vllm
 models = [
     dict(
-        type=HuggingFaceBaseModel,
-        abbr='Falcon-Mamba-7B-Base',
-        path='/root/zhuangjh/modelbase/Falcon_Mamba_7B',
-        # model_kwargs=dict(tensor_parallel_size=1, 
-        #                 #   pipeline_parallel_size=4,  # opencompass not support pp
-        #                 #   enable_expert_parallel=True,
-        #                 #   max_model_len=8192,
-        #                 #   block_size=256,
-        #                 #   dtype='bfloat16',
-        #                   torch_dtype=torch.float16,
-        #                 #   enforce_eager=True,
-        #                   trust_remote_code=True,
-        #                   ),
+        type=VLLMwithChatTemplate,
+        abbr='Mixtral-8x7B-v0.1-Chat',
+        path='/root/zhuangjh/modelbase/Mixtral_8x7B_Instruct_V0.1',
+        model_kwargs=dict(tensor_parallel_size=2, 
+                        #   pipeline_parallel_size=4,  # opencompass not support pp
+                          enable_expert_parallel=True,
+                          gpu_memory_utilization=0.7,
+                          max_model_len=16384,
+                          block_size=256,
+                          dtype='bfloat16',
+                        #   torch_dtype=torch.float16,
+                          enforce_eager=True,
+                          trust_remote_code=True,
+                          ),
+        # meta_template=meta_template,
         max_out_len=1024,
-        max_seq_len=8192,
+        max_seq_len=16384,
         batch_size=8,
         generation_kwargs=dict(temperature=0),
-        run_cfg=dict(num_gpus=1),
+        run_cfg=dict(num_gpus=2),
     ),
     
 ] 
@@ -72,17 +86,19 @@ with read_base():
     # from opencompass.configs.datasets.ARC_c.ARC_c_ppl import ARC_c_datasets
     from opencompass.configs.datasets.ARC_c.ARC_c_clean_ppl import ARC_c_datasets
     # from opencompass.configs.datasets.ARC_c.ARC_c_gen import ARC_c_datasets
-    from opencompass.configs.datasets.hellaswag.hellaswag_ppl import hellaswag_datasets
-    # from opencompass.configs.datasets.hellaswag.hellaswag_gen import hellaswag_datasets
+    # from opencompass.configs.datasets.hellaswag.hellaswag_ppl import hellaswag_datasets
+    from opencompass.configs.datasets.hellaswag.hellaswag_gen import hellaswag_datasets
 
     from opencompass.configs.summarizers.example import summarizer
     from opencompass.configs.datasets.ceval.ceval_ppl import ceval_datasets
     # from opencompass.configs.datasets.ceval.ceval_gen import ceval_datasets
     from opencompass.configs.datasets.nq.nq_gen import nq_datasets
     from opencompass.configs.datasets.triviaqa.triviaqa_gen import triviaqa_datasets
+    from opencompass.configs.datasets.IFEval.IFEval_gen import ifeval_datasets
+    from opencompass.configs.datasets.QuALITY.QuALITY_gen import QuALITY_datasets
 
 
-datasets = [*triviaqa_datasets,]
+datasets = [*ifeval_datasets,]
 
 # 评测任务配置
 # tasks = [

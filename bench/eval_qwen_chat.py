@@ -22,7 +22,7 @@ models = [
                         #   pipeline_parallel_size=4,  # opencompass not support pp
                           gpu_memory_utilization=0.64,
                         #   enable_expert_parallel=True,
-                          max_model_len=8192,
+                          max_model_len=16384,
                           block_size=256,
                           dtype='bfloat16',
                           enforce_eager=True,
@@ -30,7 +30,7 @@ models = [
                           ),
         # meta_template=meta_template,
         max_out_len=1024,
-        max_seq_len=8192,
+        max_seq_len=16384,
         batch_size=8,
         generation_kwargs=dict(temperature=0),
         run_cfg=dict(num_gpus=1),
@@ -89,9 +89,10 @@ with read_base():
     from opencompass.configs.datasets.nq.nq_gen import nq_datasets
     from opencompass.configs.datasets.triviaqa.triviaqa_gen import triviaqa_datasets
     from opencompass.configs.datasets.gsm8k.gsm8k_gen import gsm8k_datasets
+    from opencompass.configs.datasets.QuALITY.QuALITY_gen import QuALITY_datasets
+    from opencompass.configs.datasets.IFEval.IFEval_gen import ifeval_datasets
 
-
-datasets = [*gsm8k_datasets,]
+datasets = [*ifeval_datasets,]
 
 # 评测任务配置
 # tasks = [

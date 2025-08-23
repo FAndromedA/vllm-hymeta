@@ -38,33 +38,45 @@ if __name__ == "__main__":
     
     register_model()
 
-    # llm = LLM(
-    #     model="/root/zhuangjh/hymeta-70B-8K",
-    #     tensor_parallel_size=4,
-    #     # pipeline_parallel_size=1,
-    #     # enforce_eager=True,
-    #     enable_expert_parallel=True,
-    #     trust_remote_code=True,
-    #     block_size=256,
-    #     dtype='bfloat16',
-    #     max_model_len=args.length+200,
-    #     max_num_seqs=3,
-    #     gpu_memory_utilization=0.65,
-    # )
     llm = LLM(
-        model="/root/zhuangjh/hymeta-70B-8K-W8A8-Dynamic-Per-Token-llmcompressor",
+        model="/root/zhuangjh/hymeta-70B-8K",
         tensor_parallel_size=4,
         # pipeline_parallel_size=1,
         # enforce_eager=True,
         enable_expert_parallel=True,
         trust_remote_code=True,
         block_size=256,
-        dtype='auto',
+        dtype='bfloat16',
         max_model_len=args.length+200,
         max_num_seqs=3,
         gpu_memory_utilization=0.65,
-    #    quantization="awq",
     )
+    # llm = LLM(
+    #     model="/root/zhuangjh/hymeta-70B-8K-W8A8-Dynamic-Per-Token-llmcompressor",
+    #     tensor_parallel_size=4,
+    #     # pipeline_parallel_size=1,
+    #     # enforce_eager=True,
+    #     enable_expert_parallel=True,
+    #     trust_remote_code=True,
+    #     block_size=256,
+    #     dtype='auto',
+    #     max_model_len=args.length+200,
+    #     max_num_seqs=3,
+    #     gpu_memory_utilization=0.65,
+    # #    quantization="awq",
+    # )
+
+    # llm = LLM(
+    #     model="/root/zhuangjh/hymeta-7B-8bit",
+    #     # pipeline_parallel_size=1,
+    #     # enforce_eager=True,
+    #     trust_remote_code=True,
+    #     block_size=64,
+    #     dtype='auto',
+    #     max_model_len=args.length+200,
+    #     max_num_seqs=3,
+    #     gpu_memory_utilization=0.65,
+    # )
 
     # 采样参数在一个专门的对象中进行配置。
     sampling_params = SamplingParams(
@@ -141,7 +153,10 @@ python3 speed_vllm.py \
     --maxlen 128 \
     --num_runs 10 
 
-nohup python3 speed_vllm.py     --length 65536     --maxlen 128     --num_runs 10 > _speed_test_65536.log 2>&1 &
+nohup python3 speed_vllm.py     --length 65536     --maxlen 128     --num_runs 10 > _speed_test_64k.log 2>&1 &
+
+VLLM_ATTENTION_BACKEND="XFORMERS" nohup python3 speed_vllm.py     --length 130000     --maxlen 128     --num_runs 10 > _speed_7B_test_128k.log 2>&1 &
+
 """
 # 32768 65536 130000 130871 (131072-200-1)
 # non-quant
