@@ -160,7 +160,8 @@ class GatedLinearAttention(nn.Module):
             output_size=self.total_num_key_value_heads * self.head_dim,
             bias0=False,
             bias1=True,
-            quant_config=quant_config,
+            quant_config=None,
+            # quant_config=quant_config,
             prefix=f"{prefix}.gk_proj"
         )
         self.gate_logit_normalizer = gate_logit_normalizer

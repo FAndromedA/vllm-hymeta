@@ -6,24 +6,46 @@ from opencompass.models import VLLMwithChatTemplate
 from opencompass.models import HuggingFaceBaseModel
 
 #vllm
+# models = [
+#     dict(
+#         type=VLLM,
+#         abbr='Hymeta-70B',
+#         path='/root/zhuangjh/hymeta-70B-8K',
+#         model_kwargs=dict(tensor_parallel_size=4, 
+#                         #   pipeline_parallel_size=4,  # opencompass not support pp
+#                           gpu_memory_utilization=0.64,
+#                           enable_expert_parallel=True,
+#                           max_model_len=8192,
+#                           block_size=256,
+#                           dtype='bfloat16',
+#                           enforce_eager=True,
+#                           trust_remote_code=True,
+#                           ),
+#         max_out_len=1024,
+#         max_seq_len=8192,
+#         batch_size=32,
+#         generation_kwargs=dict(temperature=0),
+#         run_cfg=dict(num_gpus=4),
+#     )
+# ] 
 models = [
     dict(
         type=VLLM,
-        abbr='Hymeta-70B',
-        path='/root/zhuangjh/hymeta-70B-8K',
+        abbr='hymeta-7B-gptq',
+        path='/root/zhuangjh/hymeta-7B-gptq-exclude-gk',
         model_kwargs=dict(tensor_parallel_size=4, 
                         #   pipeline_parallel_size=4,  # opencompass not support pp
                           gpu_memory_utilization=0.64,
-                          enable_expert_parallel=True,
+                        #  enable_expert_parallel=True,
                           max_model_len=8192,
                           block_size=256,
                           dtype='bfloat16',
-                          enforce_eager=True,
+                        #  enforce_eager=True,
                           trust_remote_code=True,
                           ),
         max_out_len=1024,
         max_seq_len=8192,
-        batch_size=32,
+        batch_size=64,
         generation_kwargs=dict(temperature=0),
         run_cfg=dict(num_gpus=4),
     )
@@ -81,7 +103,7 @@ with read_base():
     from opencompass.configs.datasets.triviaqa.triviaqa_gen import triviaqa_datasets
 
 
-datasets = [*nq_datasets,]
+datasets = [*mmlu_datasets,]
 
 # 评测任务配置
 # tasks = [
